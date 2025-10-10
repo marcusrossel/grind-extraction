@@ -6,7 +6,7 @@ inductive Sketch where
   | expr (e : Expr)
   | app (fn arg : Sketch)
   | contains (sketch : Sketch)
-  | or (sketch₁ sketch₂ : Sketch)
+  | or (lhs rhs : Sketch)
 
 namespace Lean.KVMap
 
@@ -20,7 +20,7 @@ def mkContainsSketch (t : Term) : KVMap :=
 def mkOrSketch (lhs rhs : Term) : KVMap :=
   { : KVMap } |>.setSyntax sketchOrLhsKey lhs |>.setSyntax sketchOrRhsKey rhs
 
-def containsSketch (kv : KVMap) : Bool :=
+def containsSketchKey (kv : KVMap) : Bool :=
   kv.contains sketchContainsKey
   || kv.contains sketchOrLhsKey
   || kv.contains sketchOrRhsKey
@@ -29,7 +29,7 @@ end KVMap
 
 def Expr.containsSketchGadget : Expr → Bool
   | .mdata data e =>
-    data.containsSketch || e.containsSketchGadget
+    data.containsSketchKey || e.containsSketchGadget
   | .app e₁ e₂ | .lam _ e₁ e₂ _ | .forallE _ e₁ e₂ _ =>
     e₁.containsSketchGadget || e₂.containsSketchGadget
   | .letE _ e₁ e₂ e₃ _ =>

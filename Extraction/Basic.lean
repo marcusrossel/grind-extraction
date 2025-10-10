@@ -1,20 +1,31 @@
 import Extraction.Sketch
 open Lean Meta Elab Term Tactic Grind
 
+-- CURRENT ISSUE: The `mvarId` and `goal.mvarId` have different mvars, and this seems to affect
+--              even local variables. So for example for local `f : Nat → Nat`, the term `f 1`
+--              will have a different fvar id for `f` in the two contexts. This might be a
+--              result of `grind` reverting (and presumably reintroducing) everything before it
+--              gets started (`Grind.initCore`).
 def extractEquivWithMinAST (mvarId : MVarId) (goal : Goal) : GrindM Expr := do
-  let type ← mvarId.getType
-  -- TODO
-  return type
+  let type ← shareCommon (← mvarId.getType)
+  let mut min     := type
+  let mut current := type
+  while true do
+    let some node := goal.getENode? current | break
+    if node.isRoot then break
+    current := node.next
+    if current.isFalse then continue
+    if current.sizeWithoutSharing < min.sizeWithoutSharing then min := current
+  return min
 
 -- Corresponds to `Lean.Meta.Grind.main`.
 def grindExtractMain (mvarId : MVarId) (params : Params) : MetaM Result := do profileitM Exception "grind" (← getOptions) do
   GrindM.runAtGoal mvarId params fun goal => do
-    let failure? ← solve goal
-    if failure?.isNone then
-      mkResult params failure?
+    if let some failedGoal ← solve goal then
+      let min ← extractEquivWithMinAST mvarId failedGoal
+      throwError "failed, but found minimal equivalent {min}"
     else
-      let min ← extractEquivWithMinAST mvarId goal
-      throwError "failed, but found equivalent {min}"
+     mkResult params none
 
 -- Corresponds to `Lean.Elab.Tactic.grind`.
 def grindExtract
