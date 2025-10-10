@@ -18,28 +18,37 @@ def extractEquivWithMinAST (mvarId : MVarId) (goal : Goal) : GrindM Expr := do
     if current.sizeWithoutSharing < min.sizeWithoutSharing then min := current
   return min
 
+def extract (mvarId : MVarId) (goal : Goal) (sketch : Sketch) : GrindM (Option Expr) := do
+  let .min := sketch | throwError "`grind extract` currently only supports the `min_ast` sketch"
+  extractEquivWithMinAST mvarId goal
+
+inductive ExtractResult where
+  | extracted (e : Expr)
+  | grind (result : Result)
+
 -- Corresponds to `Lean.Meta.Grind.main`.
-def grindExtractMain (mvarId : MVarId) (params : Params) : MetaM Result := do profileitM Exception "grind" (← getOptions) do
-  GrindM.runAtGoal mvarId params fun goal => do
-    if let some failedGoal ← solve goal then
-      let min ← extractEquivWithMinAST mvarId failedGoal
-      throwError "failed, but found minimal equivalent {min}"
-    else
-     mkResult params none
+def grindExtractMain (mvarId : MVarId) (params : Params) (sketch : Sketch) : MetaM ExtractResult := do
+  profileitM Exception "grind" (← getOptions) do
+    GrindM.runAtGoal mvarId params fun goal => do
+      let failure? ← solve goal
+      if let some failedGoal := failure? then
+        if let some extracted ← extract mvarId failedGoal sketch then
+          return .extracted extracted
+      return .grind (← mkResult params failure?)
 
 -- Corresponds to `Lean.Elab.Tactic.grind`.
 def grindExtract
     (mvarId : MVarId) (config : Grind.Config)
-    (only : Bool) (ps : TSyntaxArray ``Parser.Tactic.grindParam)
-    : TacticM Grind.Trace := do
+    (only : Bool) (ps : TSyntaxArray ``Parser.Tactic.grindParam) (sketch : Sketch)
+    : TacticM (Option Expr) := do
   if debug.terminalTacticsAsSorry.get (← getOptions) then
     mvarId.admit
-    return {}
+    return none
   mvarId.withContext do
     let params ← mkGrindParams config only ps
     let type ← mvarId.getType
     let mvar' ← mkFreshExprSyntheticOpaqueMVar type
-    let finalize (result : Grind.Result) : TacticM Grind.Trace := do
+    let finalize (result : Grind.Result) : TacticM Unit := do
       if result.hasFailed then
         throwError "`grind` failed\n{← result.toMessageData}"
       trace[grind.debug.proof] "{← instantiateMVars mvar'}"
@@ -52,9 +61,13 @@ def grindExtract
         let auxName ← Term.mkAuxName `grind
         mkAuxDefinition auxName type (← instantiateMVarsProfiling mvar') (zetaDelta := true)
       mvarId.assign e
-      return result.trace
-    let result ← grindExtractMain mvar'.mvarId! params
-    finalize result
+    let result ← grindExtractMain mvar'.mvarId! params sketch
+    match result with
+    | .extracted e =>
+      return e
+    | .grind result =>
+      finalize result
+      return none
 
 -- Corresponds to `Lean.Elab.Tactic.evalGrindCore`.
 def evalGrindExtractCore
@@ -62,15 +75,18 @@ def evalGrindExtractCore
     (config : Grind.Config)
     (only : Option Syntax)
     (params? : Option (Syntax.TSepArray `Lean.Parser.Tactic.grindParam ","))
-    : TacticM Grind.Trace := do
+    (sketch : Sketch)
+    : TacticM Unit := do
   let only := only.isSome
   let params := if let some params := params? then params.getElems else #[]
   if Grind.grind.warning.get (← getOptions) then
     logWarningAt ref "The `grind` tactic is new and its behavior may change in the future. This project has used `set_option grind.warning true` to discourage its use."
   withMainContext do
-    let result ← grindExtract (← getMainGoal) config only params
-    replaceMainGoal []
-    return result
+    let extracted? ← grindExtract (← getMainGoal) config only params sketch
+    if let some extracted := extracted? then
+      logInfoAt ref extracted
+    else
+      replaceMainGoal []
 
 open Parser.Tactic in
 syntax (name := Parser.Tactic.grindExtract)
@@ -80,7 +96,7 @@ syntax (name := Parser.Tactic.grindExtract)
 @[tactic Parser.Tactic.grindExtract] def evalGrindExtract : Tactic := fun stx => do
   match stx with
   | `(tactic| grind $config:optConfig $[only%$only]? $[[$params:grindParam,*]]? extract $sketch:term) =>
-    let sketch ← elabSketch sketch
     let config ← elabGrindConfig config
-    discard <| evalGrindExtractCore stx config only params
+    let sketch ← elabSketch sketch
+    discard <| evalGrindExtractCore stx config only params sketch
   | _ => throwUnsupportedSyntax

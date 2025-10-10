@@ -6,8 +6,7 @@ import Extraction.Basic
 
 opaque P : Nat → Nat → Nat → Prop
 opaque Q : Prop
+opaque R : Nat → Prop
 
-/-- error: failed, but found equivalent Q -/
-#guard_msgs in
-example (h : P 1 2 3 ↔ Q) : P 1 2 3 := by
-  grind extract _
+example (h : P 1 2 3 ↔ Q) (h2 : P 1 2 3 ↔ R 1) : P 1 2 3 := by
+  grind extract min_ast
