@@ -1,4 +1,5 @@
 import Extraction.Sketch
+import Extraction.Lean
 open Lean Meta Elab Term Tactic Grind
 
 -- CURRENT ISSUE: The `mvarId` and `goal.mvarId` have different mvars, and this seems to affect
@@ -6,6 +7,7 @@ open Lean Meta Elab Term Tactic Grind
 --              will have a different fvar id for `f` in the two contexts. This might be a
 --              result of `grind` reverting (and presumably reintroducing) everything before it
 --              gets started (`Grind.initCore`).
+
 def extractMinAST (target : Expr) : GoalM (Expr × Expr) := do
   let target ← shareCommon target
   let min ← foldEqc target target fun node min => do
@@ -15,18 +17,17 @@ def extractMinAST (target : Expr) : GoalM (Expr × Expr) := do
   return (target, min)
 
 structure Extracted where
-  extracted : Expr
+  extracted  : Expr
   /-- The internalized type of the proof goal. -/
-  target    : Expr
-  /-- Proves `extracted = target`. -/
-  eqProof   : Expr
+  target     : Expr
+  /-- Proves `extracted = target`/`expected ≍ target`. -/
+  eqHEqProof : Expr
 
--- TODO: Handle HEq proofs.
 def extract (target : Expr) (sketch : Sketch) : GoalM (Option Extracted) := do
   let .minAST := sketch | throwError "`grind extract` currently only supports the `min_ast` sketch"
   let (target, extracted) ← extractMinAST target
-  let eqProof ← mkEqProof extracted target
-  return some { target, extracted, eqProof }
+  let eqHEqProof ← mkEqHEqProof extracted target
+  return some { target, extracted, eqHEqProof }
 
 inductive ExtractResult where
   | extracted (ex : Extracted)
@@ -99,10 +100,10 @@ def evalGrindExtractCore
 where
   replaceGoal (extracted : Extracted) : TacticM Unit := do
     let goal ← getMainGoal
-    let { extracted, eqProof, .. } := extracted
+    let { extracted, eqHEqProof, .. } := extracted
     let tag ← goal.getTag
     let newGoal ← mkFreshExprSyntheticOpaqueMVar extracted tag
-    let proof ← mkEqMP eqProof newGoal
+    let proof ← mkEqHEqMP eqHEqProof newGoal
     goal.assign proof
     replaceMainGoal [newGoal.mvarId!]
 
