@@ -8,14 +8,10 @@ open Lean Meta Elab Term Tactic Grind
 --              gets started (`Grind.initCore`).
 def extractMinAST (target : Expr) : GoalM (Expr × Expr) := do
   let target ← shareCommon target
-  let mut min := target
-  let mut current := target
-  while true do
-    let some node ← getENode? current | break
-    if node.isRoot then break
-    current := node.next
-    if current.isFalse then continue
-    if current.sizeWithoutSharing < min.sizeWithoutSharing then min := current
+  let min ← foldEqc target target fun node min => do
+    let expr := node.self
+    if expr.isFalse then return min
+    if expr.sizeWithoutSharing < min.sizeWithoutSharing then return expr else return min
   return (target, min)
 
 structure Extracted where
@@ -29,7 +25,7 @@ structure Extracted where
 def extract (target : Expr) (sketch : Sketch) : GoalM (Option Extracted) := do
   let .minAST := sketch | throwError "`grind extract` currently only supports the `min_ast` sketch"
   let (target, extracted) ← extractMinAST target
-  let eqProof ← mkEqProof target extracted
+  let eqProof ← mkEqProof extracted target
   return some { target, extracted, eqProof }
 
 inductive ExtractResult where
