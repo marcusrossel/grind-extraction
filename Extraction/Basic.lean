@@ -6,33 +6,43 @@ open Lean Meta Elab Term Tactic Grind
 --              will have a different fvar id for `f` in the two contexts. This might be a
 --              result of `grind` reverting (and presumably reintroducing) everything before it
 --              gets started (`Grind.initCore`).
-def extractEquivWithMinAST (mvarId : MVarId) : GoalM Expr := do
-  let type ← shareCommon (← mvarId.getType)
-  let mut min := type
-  let mut current := type
+def extractMinAST (target : Expr) : GoalM (Expr × Expr) := do
+  let target ← shareCommon target
+  let mut min := target
+  let mut current := target
   while true do
     let some node ← getENode? current | break
     if node.isRoot then break
     current := node.next
     if current.isFalse then continue
     if current.sizeWithoutSharing < min.sizeWithoutSharing then min := current
-  return min
+  return (target, min)
 
-def extract (mvarId : MVarId) (sketch : Sketch) : GoalM (Option Expr) := do
-  let .min := sketch | throwError "`grind extract` currently only supports the `min_ast` sketch"
-  extractEquivWithMinAST mvarId
+structure Extracted where
+  extracted : Expr
+  /-- The internalized type of the proof goal. -/
+  target    : Expr
+  /-- Proves `extracted = target`. -/
+  eqProof   : Expr
+
+-- TODO: Handle HEq proofs.
+def extract (target : Expr) (sketch : Sketch) : GoalM (Option Extracted) := do
+  let .minAST := sketch | throwError "`grind extract` currently only supports the `min_ast` sketch"
+  let (target, extracted) ← extractMinAST target
+  let eqProof ← mkEqProof target extracted
+  return some { target, extracted, eqProof }
 
 inductive ExtractResult where
-  | extracted (e : Expr)
+  | extracted (ex : Extracted)
   | grind (result : Grind.Result)
 
 -- Corresponds to `Lean.Meta.Grind.main`.
-def grindExtractMain (mvarId : MVarId) (params : Params) (sketch : Sketch) : MetaM ExtractResult := do
+def grindExtractMain (target : MVarId) (params : Params) (sketch : Sketch) : MetaM ExtractResult := do
   profileitM Exception "grind" (← getOptions) do
-    GrindM.runAtGoal mvarId params fun goal => do
+    GrindM.runAtGoal target params fun goal => do
       let failure? ← solve goal
       if let some failedGoal := failure? then
-        let (extracted?, _) ← GoalM.run failedGoal do extract mvarId sketch
+        let (extracted?, _) ← GoalM.run failedGoal do extract (← target.getType) sketch
         if let some extracted := extracted? then
           return .extracted extracted
       return .grind (← mkResult params failure?)
@@ -41,7 +51,7 @@ def grindExtractMain (mvarId : MVarId) (params : Params) (sketch : Sketch) : Met
 def grindExtract
     (mvarId : MVarId) (config : Grind.Config)
     (only : Bool) (ps : TSyntaxArray ``Parser.Tactic.grindParam) (sketch : Sketch)
-    : TacticM (Option Expr) := do
+    : TacticM (Option Extracted) := do
   if debug.terminalTacticsAsSorry.get (← getOptions) then
     mvarId.admit
     return none
@@ -62,9 +72,11 @@ def grindExtract
         let auxName ← Term.mkAuxName `grind
         mkAuxDefinition auxName type (← instantiateMVarsProfiling mvar') (zetaDelta := true)
       mvarId.assign e
+    -- Note: we pass a copy `mvar'` of the original proof goal `mvarId` here!
     let result ← grindExtractMain mvar'.mvarId! params sketch
     match result with
     | .extracted e =>
+      -- Note: we don't do anything with `mvar'` as it is not the proof goal `mvarId`.
       return e
     | .grind result =>
       finalize result
@@ -85,9 +97,18 @@ def evalGrindExtractCore
   withMainContext do
     let extracted? ← grindExtract (← getMainGoal) config only params sketch
     if let some extracted := extracted? then
-      logInfoAt ref extracted
+      replaceGoal extracted
     else
       replaceMainGoal []
+where
+  replaceGoal (extracted : Extracted) : TacticM Unit := do
+    let goal ← getMainGoal
+    let { extracted, eqProof, .. } := extracted
+    let tag ← goal.getTag
+    let newGoal ← mkFreshExprSyntheticOpaqueMVar extracted tag
+    let proof ← mkEqMP eqProof newGoal
+    goal.assign proof
+    replaceMainGoal [newGoal.mvarId!]
 
 open Parser.Tactic in
 syntax (name := Parser.Tactic.grindExtract)

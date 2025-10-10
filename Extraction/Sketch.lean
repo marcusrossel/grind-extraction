@@ -7,14 +7,14 @@ inductive Sketch where
   | app (fn arg : Sketch)
   | contains (sketch : Sketch)
   | or (lhs rhs : Sketch)
-  | min
+  | minAST
 
 namespace Lean.KVMap
 
 private def sketchContainsKey := `sketchContainsKey
 private def sketchOrLhsKey    := `sketchOrLhsKey
 private def sketchOrRhsKey    := `sketchOrRhsKey
-private def sketchMinKey      := `sketchOrRhsKey
+private def sketchMinASTKey   := `sketchMinASTKey
 
 def mkContainsSketch (t : Term) : KVMap :=
   { : KVMap }.setSyntax sketchContainsKey t
@@ -22,8 +22,8 @@ def mkContainsSketch (t : Term) : KVMap :=
 def mkOrSketch (lhs rhs : Term) : KVMap :=
   { : KVMap } |>.setSyntax sketchOrLhsKey lhs |>.setSyntax sketchOrRhsKey rhs
 
-def mkMinSketch (ref : Syntax) : KVMap :=
-  { : KVMap } |>.setSyntax sketchMinKey ref
+def mkMinASTSketch (ref : Syntax) : KVMap :=
+  { : KVMap } |>.setSyntax sketchMinASTKey ref
 
 def containsSketchKey (kv : KVMap) : Bool :=
   kv.contains sketchContainsKey
@@ -51,8 +51,8 @@ def MData.getOrSketches? (data : MData) : Option (Syntax × Syntax) := do
   let some (.ofSyntax orRhs) := data.find KVMap.sketchOrRhsKey | none
   (orLhs, orRhs)
 
-def MData.getMinSketch? (data : MData) : Option Syntax := do
-  let some (.ofSyntax ref) := data.find KVMap.sketchMinKey | none
+def MData.getMinASTSketch? (data : MData) : Option Syntax := do
+  let some (.ofSyntax ref) := data.find KVMap.sketchMinASTKey | none
   ref
 
 end Lean
@@ -64,7 +64,7 @@ syntax "min_ast" : term            -- Sketch.min
 elab_rules : term
   | `([$t:term]ₛ)             => return .mdata (KVMap.mkContainsSketch t) (← mkFreshExprMVar none)
   | `($lhs:term |ₛ $rhs:term) => return .mdata (KVMap.mkOrSketch lhs rhs) (← mkFreshExprMVar none)
-  | `(min_ast%$ref)           => return .mdata (KVMap.mkMinSketch ref) (← mkFreshExprMVar none)
+  | `(min_ast%$ref)           => return .mdata (KVMap.mkMinASTSketch ref) (← mkFreshExprMVar none)
 
 -- TODO: We should probably normalize things with `grind`'s normalization procedure, if we want to
 --       hope to find expressions in the e-graph. For example, I think `grind` ζ-reduces.
@@ -73,7 +73,8 @@ partial def elabSketch (stx : TSyntax `term) : TermElabM Sketch := do
   -- We instantiate mvars, as otherwise terms like `(1 : Nat)` do not resolve the type variables of
   -- `OfNat.ofNat` to `Nat`.
   let e ← instantiateMVars e
-  go e
+  let sketch ← go e
+  return sketch
 where
   go : Expr → TermElabM Sketch
     | .mdata data e => do
@@ -84,8 +85,8 @@ where
         let lhs ← elabSketch ⟨orLhs⟩
         let rhs ← elabSketch ⟨orRhs⟩
         return .or lhs rhs
-      if let some _ := data.getMinSketch? then
-        return .min
+      if let some _ := data.getMinASTSketch? then
+        return .minAST
       return .expr e
     | .app fn arg =>
       -- This check normalizes our sketch representation, such that we don't introduce unnecessary
@@ -112,7 +113,7 @@ def Sketch.format : Sketch → Format
   | app fn arg           => format fn ++ " " ++ format arg
   | contains sketch      => "[" ++ format sketch ++ "]ₛ"
   | or sketch₁ sketch₂   => format sketch₁ ++ " |ₛ " ++ format sketch₂
-  | min                  => "min_ast"
+  | minAST               => "min_ast"
 
 instance : Std.ToFormat Sketch where
   format := Sketch.format
