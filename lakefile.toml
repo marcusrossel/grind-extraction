@@ -1,0 +1,6 @@
+name = "Extraction"
+version = "0.1.0"
+defaultTargets = ["Extraction"]
+
+[[lean_lib]]
+name = "Extraction"
