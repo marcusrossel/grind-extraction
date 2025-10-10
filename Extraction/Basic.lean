@@ -6,25 +6,25 @@ open Lean Meta Elab Term Tactic Grind
 --              will have a different fvar id for `f` in the two contexts. This might be a
 --              result of `grind` reverting (and presumably reintroducing) everything before it
 --              gets started (`Grind.initCore`).
-def extractEquivWithMinAST (mvarId : MVarId) (goal : Goal) : GrindM Expr := do
+def extractEquivWithMinAST (mvarId : MVarId) : GoalM Expr := do
   let type ← shareCommon (← mvarId.getType)
-  let mut min     := type
+  let mut min := type
   let mut current := type
   while true do
-    let some node := goal.getENode? current | break
+    let some node ← getENode? current | break
     if node.isRoot then break
     current := node.next
     if current.isFalse then continue
     if current.sizeWithoutSharing < min.sizeWithoutSharing then min := current
   return min
 
-def extract (mvarId : MVarId) (goal : Goal) (sketch : Sketch) : GrindM (Option Expr) := do
+def extract (mvarId : MVarId) (sketch : Sketch) : GoalM (Option Expr) := do
   let .min := sketch | throwError "`grind extract` currently only supports the `min_ast` sketch"
-  extractEquivWithMinAST mvarId goal
+  extractEquivWithMinAST mvarId
 
 inductive ExtractResult where
   | extracted (e : Expr)
-  | grind (result : Result)
+  | grind (result : Grind.Result)
 
 -- Corresponds to `Lean.Meta.Grind.main`.
 def grindExtractMain (mvarId : MVarId) (params : Params) (sketch : Sketch) : MetaM ExtractResult := do
@@ -32,7 +32,8 @@ def grindExtractMain (mvarId : MVarId) (params : Params) (sketch : Sketch) : Met
     GrindM.runAtGoal mvarId params fun goal => do
       let failure? ← solve goal
       if let some failedGoal := failure? then
-        if let some extracted ← extract mvarId failedGoal sketch then
+        let (extracted?, _) ← GoalM.run failedGoal do extract mvarId sketch
+        if let some extracted := extracted? then
           return .extracted extracted
       return .grind (← mkResult params failure?)
 
