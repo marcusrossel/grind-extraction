@@ -32,10 +32,6 @@ inductive ExtractResult where
   | extracted (ex : Extracted)
   | grind (result : Grind.Result)
 
-private inductive GrindSolveState where
-  | solved (result : Grind.Result)
-  | failed (originalGoal failedGoal : Goal) (methods : MethodsRef) (context : Meta.Grind.Context) (state : Meta.Grind.State)
-
 -- Corresponds to `Lean.Meta.Grind.main`.
 def grindExtractMain (target : MVarId) (params : Params) (sketch : Sketch) : MetaM ExtractResult := do
   profileitM Exception "grind" (← getOptions) do
@@ -47,7 +43,12 @@ def grindExtractMain (target : MVarId) (params : Params) (sketch : Sketch) : Met
           let newFVars ← getLocalHyps
           let target ← target.getType
           let target := target.replaceFVars oldFVars (newFVars.take oldFVars.size)
+          let target ← Grind.unfoldReducible target
+          let target ← Core.betaReduce target
           extract target sketch
+          -- TODO: Just try to translate the fvars back the same way as for `target`, and see if
+          --       this works most of the time (most of the time is good enough for now, as our goal
+          --       is only to test different kinds of extraction for now).
         if let some extracted := extracted? then
           return .extracted extracted
       return .grind (← mkResult params failure?)
