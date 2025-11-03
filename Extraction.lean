@@ -34,8 +34,17 @@ example : P 1 2 3 := by
 
 end NoFVars
 
--- PROBLEM: The proof term contains fvars from grind's local context. That is, we're managing to get
---          terms *into* grind, but not out of it. How does grind handle the latter?
-example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 ↔ Q) : P 1 2 3 := by
+section FVars
+
+/--
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ Q
+-/
+#guard_msgs in
+example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : P 1 2 3 := by
   grind extract min_ast
-  constructor
+
+end FVars

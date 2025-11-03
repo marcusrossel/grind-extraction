@@ -11,13 +11,8 @@ def extractMinAST (target : Expr) : GoalM (Expr × Expr) := do
   return (target, min)
 
 structure Extracted where
-  /-- The goal in whose context the following expressions are defined.
-      This is relevant for validity of fvars and mvars. -/
-  goal       : MVarId
   /-- The result of extraction: the extracted term, equivalent to the proof goal. -/
   result     : Expr
-  /-- The internalized type of the proof goal. -/
-  target     : Expr
   /-- Proves `result = target`/`result ≍ target`. -/
   eqHEqProof : Expr
 
@@ -25,12 +20,28 @@ def extract (target : Expr) (sketch : Sketch) : GoalM (Option Extracted) := do
   let .minAST := sketch | throwError "`grind extract` currently only supports the `min_ast` sketch"
   let (internalizedTarget, result) ← extractMinAST target
   let eqHEqProof ← mkEqHEqProof result internalizedTarget
-  let grindGoal := (← get).mvarId
-  return some { result, target := internalizedTarget, goal := grindGoal, eqHEqProof }
+  return some { result, eqHEqProof }
 
 inductive ExtractResult where
   | extracted (ex : Extracted)
   | grind (result : Grind.Result)
+
+-- Note: The replacement of fvars may be sketchy, as while `grind` sets `preserveOrder := true` when
+--       calling `revertAll`, I'm not sure if there are other aspects which may affect the order of
+--       fvars in `grind`'s local context. For example, does `intros` preserve the order?
+def Lean.Expr.toGrind (oldFVars newFVars : Array Expr) (e : Expr) : MetaM Expr := do
+  let e := e.replaceFVars oldFVars (newFVars.take oldFVars.size)
+  let e ← Grind.unfoldReducible e
+  Core.betaReduce e
+
+-- NOTE: We just translate the fvars back naively for now, as our goal is first to test different
+--       kinds of extraction, so it's ok if this fails sometimes.
+def Lean.Expr.fromGrind (oldFVars newFVars : Array Expr) (e : Expr) : Expr :=
+  e.replaceFVars (newFVars.take oldFVars.size) oldFVars
+
+def Extracted.fromGrind (oldFVars newFVars : Array Expr) (ex : Extracted) : Extracted where
+  result     := ex.result.fromGrind oldFVars newFVars
+  eqHEqProof := ex.eqHEqProof.fromGrind oldFVars newFVars
 
 -- Corresponds to `Lean.Meta.Grind.main`.
 def grindExtractMain (target : MVarId) (params : Params) (sketch : Sketch) : MetaM ExtractResult := do
@@ -42,13 +53,9 @@ def grindExtractMain (target : MVarId) (params : Params) (sketch : Sketch) : Met
         let (extracted?, _) ← GoalM.run failedGoal do
           let newFVars ← getLocalHyps
           let target ← target.getType
-          let target := target.replaceFVars oldFVars (newFVars.take oldFVars.size)
-          let target ← Grind.unfoldReducible target
-          let target ← Core.betaReduce target
-          extract target sketch
-          -- TODO: Just try to translate the fvars back the same way as for `target`, and see if
-          --       this works most of the time (most of the time is good enough for now, as our goal
-          --       is only to test different kinds of extraction for now).
+          let target ← target.toGrind oldFVars newFVars
+          let some ex ← extract target sketch | return none
+          return some <| ex.fromGrind oldFVars newFVars
         if let some extracted := extracted? then
           return .extracted extracted
       return .grind (← mkResult params failure?)
@@ -106,10 +113,6 @@ def evalGrindExtractCore
       replaceMainGoal []
 where
   replaceGoal (extracted : Extracted) : TacticM Unit := do
-    -- TODO: Is there an order in which we can assign the mvars, so that fvars remain in the correct
-    --       contexts? I think we can't avoid moving `extracted.result` back to the outer context.
-    --       This is problematic as there may be some variables in grind's context which were still
-    --       in the goal in the outer context.
     let goal ← getMainGoal
     let tag ← goal.getTag
     let newGoal ← mkFreshExprSyntheticOpaqueMVar extracted.result tag
