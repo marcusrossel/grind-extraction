@@ -2,12 +2,6 @@ import Extraction.Sketch
 import Extraction.Lean
 open Lean Meta Elab Term Tactic Grind
 
--- CURRENT ISSUE: The `mvarId` and `goal.mvarId` have different mvars, and this seems to affect
---              even local variables. So for example for local `f : Nat → Nat`, the term `f 1`
---              will have a different fvar id for `f` in the two contexts. This might be a
---              result of `grind` reverting (and presumably reintroducing) everything before it
---              gets started (`Grind.initCore`).
-
 def extractMinAST (target : Expr) : GoalM (Expr × Expr) := do
   let target ← shareCommon target
   let min ← foldEqc target target fun node min => do
@@ -17,29 +11,43 @@ def extractMinAST (target : Expr) : GoalM (Expr × Expr) := do
   return (target, min)
 
 structure Extracted where
-  extracted  : Expr
+  /-- The goal in whose context the following expressions are defined.
+      This is relevant for validity of fvars and mvars. -/
+  goal       : MVarId
+  /-- The result of extraction: the extracted term, equivalent to the proof goal. -/
+  result     : Expr
   /-- The internalized type of the proof goal. -/
   target     : Expr
-  /-- Proves `extracted = target`/`expected ≍ target`. -/
+  /-- Proves `result = target`/`result ≍ target`. -/
   eqHEqProof : Expr
 
 def extract (target : Expr) (sketch : Sketch) : GoalM (Option Extracted) := do
   let .minAST := sketch | throwError "`grind extract` currently only supports the `min_ast` sketch"
-  let (target, extracted) ← extractMinAST target
-  let eqHEqProof ← mkEqHEqProof extracted target
-  return some { target, extracted, eqHEqProof }
+  let (internalizedTarget, result) ← extractMinAST target
+  let eqHEqProof ← mkEqHEqProof result internalizedTarget
+  let grindGoal := (← get).mvarId
+  return some { result, target := internalizedTarget, goal := grindGoal, eqHEqProof }
 
 inductive ExtractResult where
   | extracted (ex : Extracted)
   | grind (result : Grind.Result)
 
+private inductive GrindSolveState where
+  | solved (result : Grind.Result)
+  | failed (originalGoal failedGoal : Goal) (methods : MethodsRef) (context : Meta.Grind.Context) (state : Meta.Grind.State)
+
 -- Corresponds to `Lean.Meta.Grind.main`.
 def grindExtractMain (target : MVarId) (params : Params) (sketch : Sketch) : MetaM ExtractResult := do
   profileitM Exception "grind" (← getOptions) do
+    let oldFVars ← getLocalHyps
     GrindM.runAtGoal target params fun goal => do
       let failure? ← solve goal
       if let some failedGoal := failure? then
-        let (extracted?, _) ← GoalM.run failedGoal do extract (← target.getType) sketch
+        let (extracted?, _) ← GoalM.run failedGoal do
+          let newFVars ← getLocalHyps
+          let target ← target.getType
+          let target := target.replaceFVars oldFVars (newFVars.take oldFVars.size)
+          extract target sketch
         if let some extracted := extracted? then
           return .extracted extracted
       return .grind (← mkResult params failure?)
@@ -69,12 +77,10 @@ def grindExtract
         let auxName ← Term.mkAuxName `grind
         mkAuxDefinition auxName type (← instantiateMVarsProfiling mvar') (zetaDelta := true)
       mvarId.assign e
-    -- Note: we pass a copy `mvar'` of the original proof goal `mvarId` here!
     let result ← grindExtractMain mvar'.mvarId! params sketch
     match result with
-    | .extracted e =>
-      -- Note: we don't do anything with `mvar'` as it is not the proof goal `mvarId`.
-      return e
+    | .extracted extracted =>
+      return extracted
     | .grind result =>
       finalize result
       return none
@@ -99,17 +105,20 @@ def evalGrindExtractCore
       replaceMainGoal []
 where
   replaceGoal (extracted : Extracted) : TacticM Unit := do
+    -- TODO: Is there an order in which we can assign the mvars, so that fvars remain in the correct
+    --       contexts? I think we can't avoid moving `extracted.result` back to the outer context.
+    --       This is problematic as there may be some variables in grind's context which were still
+    --       in the goal in the outer context.
     let goal ← getMainGoal
-    let { extracted, eqHEqProof, .. } := extracted
     let tag ← goal.getTag
-    let newGoal ← mkFreshExprSyntheticOpaqueMVar extracted tag
-    let proof ← mkEqHEqMP eqHEqProof newGoal
+    let newGoal ← mkFreshExprSyntheticOpaqueMVar extracted.result tag
+    let proof ← mkEqHEqMP extracted.eqHEqProof newGoal
     goal.assign proof
     replaceMainGoal [newGoal.mvarId!]
 
 open Parser.Tactic in
 syntax (name := Parser.Tactic.grindExtract)
-    "grind" optConfig (&" only")? (" [" withoutPosition(grindParam,*) "]")? " extract" term : tactic
+  "grind" optConfig (&" only")? (" [" withoutPosition(grindParam,*) "]")? " extract" term : tactic
 
 -- Corresponds to `Lean.Elab.Tactic.evalGrind`.
 @[tactic Parser.Tactic.grindExtract] def evalGrindExtract : Tactic := fun stx => do
