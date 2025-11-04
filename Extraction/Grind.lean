@@ -20,6 +20,14 @@ def exprToGrind (oldFVars newFVars : Array Expr) (e : Expr) : MetaM Expr := do
   let e ← Grind.unfoldReducible e
   Core.betaReduce e
 
+def Sketch.toGrind (oldFVars newFVars : Array Expr) (sketch : Sketch) : MetaM Sketch := do
+  match sketch with
+  | expr e          => return expr (← exprToGrind oldFVars newFVars e)
+  | app fn arg      => return app (← fn.toGrind oldFVars newFVars) (← arg.toGrind oldFVars newFVars)
+  | contains sketch => return contains (← sketch.toGrind oldFVars newFVars)
+  | or lhs rhs      => return or (← lhs.toGrind oldFVars newFVars) (← rhs.toGrind oldFVars newFVars)
+  | minAST          => return minAST
+
 -- TODO: We just translate the fvars back naively for now, as our goal is first to test different
 --       kinds of extraction, so it's ok if this fails sometimes.
 def exprFromGrind (oldFVars newFVars : Array Expr) (e : Expr) : Expr :=
@@ -29,20 +37,26 @@ def Extracted.fromGrind (oldFVars newFVars : Array Expr) (ex : Extracted) : Extr
   result     := exprFromGrind oldFVars newFVars ex.result
   eqHEqProof := exprFromGrind oldFVars newFVars ex.eqHEqProof
 
+def onFailure (target : MVarId) (sketch : Sketch) (oldFVars : Array Expr) :
+    GoalM (Option Extracted) := do
+  let newFVars ← getLocalHyps
+  let target ← target.getType
+  let target ← exprToGrind oldFVars newFVars target
+  let target ← shareCommon target
+  let sketch ← sketch.toGrind oldFVars newFVars
+  let some ex ← extract? target sketch | return none
+  return ex.fromGrind oldFVars newFVars
+
 -- Corresponds to `Lean.Meta.Grind.main`.
-protected def main
-    (target : MVarId) (params : Params) (sketch : Sketch) : MetaM Extraction.Result := do
+protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
+    MetaM Extraction.Result := do
   profileitM Exception "grind" (← getOptions) do
     let oldFVars ← getLocalHyps
     GrindM.runAtGoal target params fun goal => do
       let failure? ← solve goal
       if let some failedGoal := failure? then
         let (extracted?, _) ← GoalM.run failedGoal do
-          let newFVars ← getLocalHyps
-          let target ← target.getType
-          let target ← exprToGrind oldFVars newFVars target
-          let some ex ← extract target sketch | return none
-          return some <| ex.fromGrind oldFVars newFVars
+          onFailure target sketch oldFVars
         if let some extracted := extracted? then
           return .extracted extracted
       return .grind (← mkResult params failure?)
@@ -105,6 +119,6 @@ syntax (name := Parser.Tactic.grindExtract)
   match stx with
   | `(tactic| grind $config:optConfig $[only%$only]? $[[$params:grindParam,*]]? extract $sketch:term) =>
     let config ← elabGrindConfig config
-    let sketch ← elabSketch sketch
+    let sketch ← Sketch.elabSketch sketch
     discard <| Extraction.evalGrindCore stx config only params sketch
   | _ => throwUnsupportedSyntax

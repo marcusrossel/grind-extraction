@@ -45,4 +45,26 @@ h : P 1 2 3 = Q
 example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : P 1 2 3 := by
   grind extract min_ast
 
+/--
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ Q
+-/
+#guard_msgs in
+example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : P 1 2 3 := by
+  grind extract Q
+
+/--
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : P 1 2 3 := by
+  grind extract P 1 2 3
+
 end FVars

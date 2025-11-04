@@ -1,7 +1,9 @@
 import Lean
 open Lean Meta Elab Term Command
 
-inductive Sketch where
+namespace Lean
+
+inductive Meta.Grind.Extraction.Sketch where
   -- Holes are represented as `.expr (.mvar _)`.
   | expr (e : Expr)
   | app (fn arg : Sketch)
@@ -9,7 +11,7 @@ inductive Sketch where
   | or (lhs rhs : Sketch)
   | minAST
 
-namespace Lean.KVMap
+namespace KVMap
 
 private def sketchContainsKey := `sketchContainsKey
 private def sketchOrLhsKey    := `sketchOrLhsKey
@@ -55,11 +57,11 @@ def MData.getMinASTSketch? (data : MData) : Option Syntax := do
   let some (.ofSyntax ref) := data.find KVMap.sketchMinASTKey | none
   ref
 
-end Lean
+namespace Meta.Grind.Extraction.Sketch
 
 syntax "[" term "]ₛ" : term        -- Sketch.contains
 syntax:min term " |ₛ " term : term -- Sketch.or
-syntax "min_ast" : term            -- Sketch.min
+syntax "min_ast" : term            -- Sketch.minAST
 
 elab_rules : term
   | `([$t:term]ₛ)             => return .mdata (KVMap.mkContainsSketch t) (← mkFreshExprMVar none)
@@ -106,7 +108,7 @@ where
 -- TODO: Improve this. E.g. how does pretty printing expressions ensure that applications contain
 --       parentheses when necessary, and only when necessary.
 --       Also use `MessageData` so you get info on hover.
-def Sketch.format : Sketch → Format
+def format : Sketch → Format
   | expr e               => Std.ToFormat.format e
   | app fn arg@(.app ..)
   | app fn arg@(.or ..)  => format fn ++ " " ++ "(" ++ format arg ++ ")"
