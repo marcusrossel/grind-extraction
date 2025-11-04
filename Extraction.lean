@@ -67,4 +67,21 @@ h : P 1 2 3 = Q
 example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : P 1 2 3 := by
   grind extract P 1 2 3
 
+/--
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : Q := by
+  grind extract P _ _ _
+
+-- TODO: Why does this not work? Logging in `extractExpr?` indicates that while we do traverse the
+--       entire e-class, the `isDefEq` check simply always fails. Is this because we don't
+--       translate mvars into grind's context?
+example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : Q := by
+  grind extract _
+
 end FVars
