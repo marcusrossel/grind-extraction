@@ -1,6 +1,6 @@
 import Extraction.Core
 import Extraction.Lean
-open Lean Elab Parser Tactic
+open Lean Meta Elab Parser Tactic Grind Extraction
 
 /- This file defines the uninteresting part of the `grind extract` elaborator, which mainly consists
    of slight modifications to high-level functions of (vanilla) grind's elaborator.
@@ -9,7 +9,7 @@ open Lean Elab Parser Tactic
 namespace Lean.Meta.Grind.Extraction
 
 protected inductive Result where
-  | extracted (ex : Extracted)
+  | extracted (ex : Expr)
   | grind (result : Grind.Result)
 
 -- Note: The replacement of fvars may be sketchy, as while `grind` sets `preserveOrder := true` when
@@ -33,19 +33,15 @@ def Sketch.toGrind (oldFVars newFVars : Array Expr) (sketch : Sketch) : MetaM Sk
 def exprFromGrind (oldFVars newFVars : Array Expr) (e : Expr) : Expr :=
   e.replaceFVars (newFVars.take oldFVars.size) oldFVars
 
-def Extracted.fromGrind (oldFVars newFVars : Array Expr) (ex : Extracted) : Extracted where
-  result     := exprFromGrind oldFVars newFVars ex.result
-  eqHEqProof := exprFromGrind oldFVars newFVars ex.eqHEqProof
-
 def onFailure (target : MVarId) (sketch : Sketch) (oldFVars : Array Expr) :
-    GoalM (Option Extracted) := do
+    GoalM (Option Expr) := do
   let newFVars ← getLocalHyps
   let target ← target.getType
   let target ← exprToGrind oldFVars newFVars target
   let target ← shareCommon target
   let sketch ← sketch.toGrind oldFVars newFVars
   let some ex ← extract? target sketch | return none
-  return ex.fromGrind oldFVars newFVars
+  return exprFromGrind oldFVars newFVars ex
 
 -- Corresponds to `Lean.Meta.Grind.main`.
 protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
@@ -55,16 +51,20 @@ protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
     GrindM.runAtGoal target params fun goal => do
       let failure? ← solve goal
       if let some failedGoal := failure? then
-        let (extracted?, _) ← GoalM.run failedGoal do
+        let (ex?, _) ← GoalM.run failedGoal do
           onFailure target sketch oldFVars
-        if let some extracted := extracted? then
-          return .extracted extracted
+        if let some ex := ex? then
+          return .extracted ex
       return .grind (← mkResult params failure?)
+
+end Lean.Meta.Grind.Extraction
+
+namespace Lean.Elab.Tactic.Extraction
 
 -- Corresponds to `Lean.Elab.Tactic.grind`.
 protected def grind
     (mvarId : MVarId) (config : Grind.Config) (only : Bool) (ps : TSyntaxArray ``grindParam)
-    (sketch : Sketch) : TacticM (Option Extracted) := do
+    (sketch : Sketch) : TacticM (Option Expr) := do
   if debug.terminalTacticsAsSorry.get (← getOptions) then
     mvarId.admit
     return none
@@ -93,32 +93,45 @@ protected def grind
       finalize result
       return none
 
+declare_syntax_cat grindExtractPrefix
+syntax "grind" optConfig (&" only")? (" [" withoutPosition(grindParam,*) "]")? : grindExtractPrefix
+
+declare_syntax_cat grindExtractHead
+syntax grindExtractPrefix " extract" : grindExtractHead
+
+-- TODO: How does one properly turn `Syntax` into `MessageData`?
+def mkGrindSuffices (ex : Expr) (sketch : Syntax) :
+    TSyntax `grindExtractHead → TacticM TryThis.Suggestion
+  | `(grindExtractHead| $pre:grindExtractPrefix extract) => do
+    let msg := m!"suffices «{sketch.prettyPrint}» : {← ppExpr ex} by {pre.raw.prettyPrint}"
+    msg.toString
+  | _ => unreachable!
+
 -- Corresponds to `Lean.Elab.Tactic.evalGrindCore`.
 protected def evalGrindCore
-    (ref : Syntax) (config : Grind.Config) (only : Option Syntax)
-    (params? : Option (Syntax.TSepArray ``grindParam ",")) (sketch : Sketch) : TacticM Unit := do
+    (head : TSyntax `grindExtractHead) (sketch : Term) (config : Grind.Config)
+    (only : Option Syntax) (params? : Option (Syntax.TSepArray ``grindParam ",")) :
+    TacticM Unit := do
   let only := only.isSome
   let params := if let some params := params? then params.getElems else #[]
   if Grind.grind.warning.get (← getOptions) then
-    logWarningAt ref "The `grind` tactic is new and its behavior may change in the future. This project has used `set_option grind.warning true` to discourage its use."
+    logWarningAt head "The `grind` tactic is new and its behavior may change in the future. This project has used `set_option grind.warning true` to discourage its use."
   withMainContext do
-    let ex? ← Extraction.grind (← getMainGoal) config only params sketch
+    let sk ← Sketch.elabSketch sketch
+    let ex? ← Extraction.grind (← getMainGoal) config only params sk
+    -- TODO: Have a better handling for when extraction fails.
     let some ex := ex? | replaceMainGoal []
-    let goal ← getMainGoal
-    let tag ← goal.getTag
-    let newGoal ← mkFreshExprSyntheticOpaqueMVar ex.result tag
-    let proof ← mkEqHEqMP ex.eqHEqProof newGoal
-    goal.assign proof
-    replaceMainGoal [newGoal.mvarId!]
+    let suggestion ← mkGrindSuffices ex sketch head
+    Tactic.TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
 
-syntax (name := Parser.Tactic.grindExtract)
-  "grind" optConfig (&" only")? (" [" withoutPosition(grindParam,*) "]")? " extract" term : tactic
+syntax (name := Parser.Tactic.grindExtract) grindExtractHead term : tactic
 
 -- Corresponds to `Lean.Elab.Tactic.evalGrind`.
-@[tactic Parser.Tactic.grindExtract] def evalGrindExtract : Tactic := fun stx => do
-  match stx with
-  | `(tactic| grind $config:optConfig $[only%$only]? $[[$params:grindParam,*]]? extract $sketch:term) =>
-    let config ← elabGrindConfig config
-    let sketch ← Sketch.elabSketch sketch
-    discard <| Extraction.evalGrindCore stx config only params sketch
+@[tactic Parser.Tactic.grindExtract] def evalGrind : Tactic
+  | `(tactic| $head:grindExtractHead $sketch:term) => do
+    match head with
+    | `(grindExtractHead| grind $config:optConfig $[only%$only]? $[[$params:grindParam,*]]? extract) =>
+      let config ← elabGrindConfig config
+      discard <| Extraction.evalGrindCore head sketch config only params
+    | _ => throwUnsupportedSyntax
   | _ => throwUnsupportedSyntax

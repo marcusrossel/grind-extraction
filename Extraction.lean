@@ -15,16 +15,22 @@ theorem p_heq_q : P 1 2 3 ≍ Q := by
   simp [P.intro, Q.intro]
 
 /--
+info: Try this:
+  suffices «min_ast» : Q by grind [p_eq_q]
+---
 error: unsolved goals
-⊢ Q
+⊢ P 1 2 3
 -/
 #guard_msgs in
 example : P 1 2 3 := by
   grind [p_eq_q] extract min_ast
 
 /--
+info: Try this:
+  suffices «min_ast» : Q by grind [p_heq_q]
+---
 error: unsolved goals
-⊢ Q
+⊢ P 1 2 3
 -/
 #guard_msgs in
 example : P 1 2 3 := by
@@ -32,20 +38,54 @@ example : P 1 2 3 := by
 
 end NoFVars
 
-section FVars
+variable (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q)
 
 /--
+info: Try this:
+  suffices «min_ast» : Q by grind
+---
 error: unsolved goals
 P : Nat → Nat → Nat → Prop
 Q : Prop
 h : P 1 2 3 = Q
-⊢ Q
+⊢ P 1 2 3
 -/
 #guard_msgs in
-example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : P 1 2 3 := by
+example : P 1 2 3 := by
   grind extract min_ast
 
 /--
+info: Try this:
+  suffices «Q» : Q by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example : P 1 2 3 := by
+  grind extract Q
+
+/--
+info: Try this:
+  suffices «P 1 2 3» : P 1 2 3 by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example : P 1 2 3 := by
+  grind extract P 1 2 3
+
+/--
+info: Try this:
+  suffices «P _ _ _» : P 1 2 3 by grind
+---
 error: unsolved goals
 P : Nat → Nat → Nat → Prop
 Q : Prop
@@ -53,35 +93,34 @@ h : P 1 2 3 = Q
 ⊢ Q
 -/
 #guard_msgs in
-example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : P 1 2 3 := by
-  grind extract Q
-
-/--
-error: unsolved goals
-P : Nat → Nat → Nat → Prop
-Q : Prop
-h : P 1 2 3 = Q
-⊢ P 1 2 3
--/
-#guard_msgs in
-example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : P 1 2 3 := by
-  grind extract P 1 2 3
-
-/--
-error: unsolved goals
-P : Nat → Nat → Nat → Prop
-Q : Prop
-h : P 1 2 3 = Q
-⊢ P 1 2 3
--/
-#guard_msgs in
-example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : Q := by
+example : Q := by
   grind extract P _ _ _
 
--- TODO: Why does this not work? Logging in `extractExpr?` indicates that while we do traverse the
---       entire e-class, the `isDefEq` check simply always fails. Is this because we don't
---       translate mvars into grind's context?
-example (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q) : Q := by
-  grind extract _
+section ReasonForUsingSuffices
 
-end FVars
+opaque A : Prop
+opaque B : Prop
+
+-- We use `suffices` for "proof construction", as if we used `have` or direct proof replacement, we
+-- couldn't handle cases where the proof of equality between the goal and the extracted term depends
+-- on the negation of the goal.
+/--
+info: Try this:
+  suffices «A» : A by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h✝ : P 1 2 3 = Q
+h : ¬B → B = A
+⊢ B
+-/
+#guard_msgs in
+example (h : ¬B → B = A) : B := by
+  grind extract A
+
+end ReasonForUsingSuffices
+
+-- BUG: Term has not been internalized.
+example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by
+  grind extract min_ast
