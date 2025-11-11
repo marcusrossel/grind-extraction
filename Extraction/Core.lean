@@ -19,10 +19,7 @@ def extractExpr? (target expr : Expr) : GoalM (Option Expr) := do
     else
       return none
   firstInEqc? target fun e => do
-    -- TODO: This might assign some mvars contained in the sketch that we do not want to assign.
-    --       Also, we do not currently translate mvars from the outer context to grind's context. Is
-    --       that ok?
-    if ← (return !e.isFalse) <&&> isDefEq e expr then
+    if ← (return !e.isFalse) <&&> isDefEq expr e then
       return e
     else
       return none

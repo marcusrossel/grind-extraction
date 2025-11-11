@@ -121,10 +121,27 @@ example (h : ¬B → B = A) : B := by
 
 end ReasonForUsingSuffices
 
+section MVarTranslation
+
+-- We need to translate mvars from the outer context to grind's context, as otherwise an outer mvar
+-- `m` does not unify with expressions from the inner context containing fvars, as `m` has a
+-- different local context.
+/--
+info: Try this:
+  [apply] suffices «_» : P 1 2 3 by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example : P 1 2 3 := by
+  grind extract _
+
+end MVarTranslation
+
 -- BUG: Term has not been internalized.
 example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by
   grind extract min_ast
-
--- BUG: isDefEq fails on all comparisons to _ (that is, ?m.12345)
-example : P 1 2 3 := by
-  grind extract _

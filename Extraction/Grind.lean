@@ -12,9 +12,19 @@ namespace Lean.Meta.Grind.Extraction
 --       calling `revertAll`, I'm not sure if there are other aspects which may affect the order of
 --       fvars in `grind`'s local context. For example, does `intros` preserve the order?
 def exprToGrind (oldFVars newFVars : Array Expr) (e : Expr) : MetaM Expr := do
+  let e ← mvarsToGrind e
   let e := e.replaceFVars oldFVars (newFVars.take oldFVars.size)
   let e ← Grind.unfoldReducible e
   Core.betaReduce e
+where
+  mvarsToGrind (e : Expr) : MetaM Expr := do
+    let { expr, mvars, .. } ← Meta.abstractMVars e (levels := false)
+    let mut e := expr
+    for mvar in mvars do
+      let type ← mvar.mvarId!.getType
+      let fresh ← mkFreshExprMVar type
+      e := mkApp e fresh
+    return e
 
 def Sketch.toGrind (oldFVars newFVars : Array Expr) (sketch : Sketch) : MetaM Sketch := do
   match sketch with
@@ -94,12 +104,12 @@ where
     if let some proof := proof? then
       mvarId.assign proof
       replaceMainGoal []
-    else
+    else /- if extracted -/
       -- When calling `withProtectedMCtx`, the goal `mvarId` is immediately assigned by
       -- `abstractMVars` and `clearImplDetails` and is therefore not a goal from the point of view
       -- of `TacticM` anymore (it still shows up in `getGoals`, but not in `getMainGoal`, as the
-      -- latter filters out assigned goals). We therefore need to push the (new/updated) goal mvar
-      -- back onto the list goals.
+      -- latter filters out assigned mvars). We therefore need to push the (new/updated) goal mvar
+      -- back onto the list of goals.
       pushGoal mvarId
   finalize (mvar' : Expr) : MetaM Expr := do
     trace[grind.debug.proof] "{← instantiateMVars mvar'}"
@@ -119,10 +129,6 @@ syntax "grind" optConfig (&" only")? (" [" withoutPosition(grindParam,*) "]")? :
 
 declare_syntax_cat grindExtractHead
 syntax grindExtractPrefix " extract" : grindExtractHead
-
-def headToPrefix : TSyntax `grindExtractHead → TSyntax `grindExtractPrefix
-  | `(grindExtractHead| $pre:grindExtractPrefix extract) => pre
-  | _                                                    => unreachable!
 
 -- TODO: How does one properly turn `Syntax` into `MessageData` (instead of `.raw.prettyPrint`)?
 def grindSufficesSuggestion (ex : Expr) (sketch : Syntax) (pre : TSyntax `grindExtractPrefix) :
@@ -144,18 +150,18 @@ protected def «grind»
     withProtectedMCtx config.abstractProof mvarId fun mvarId' => do
       let s ← Sketch.elabSketch sketch
       let result ← Extraction.main mvarId' params s
-      let pre := headToPrefix head
+      let `(grindExtractHead| $pre:grindExtractPrefix extract) := head | unreachable!
       match result with
       | .failure res =>
         throwError "`grind extract` failed\n{← res.toMessageData}"
       | .success .grind =>
         logWarningAt head "`grind` succeeded, extraction is redundant"
         let suggestion := grindPlainSuggestion pre
-        Tactic.TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
+        TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
         return .grind
       | .success (.extraction ex) =>
         let suggestion ← grindSufficesSuggestion ex sketch pre
-        Tactic.TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
+        TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
         return .extraction ex
 
 -- Corresponds to `Lean.Elab.Tactic.evalGrindCore`.
