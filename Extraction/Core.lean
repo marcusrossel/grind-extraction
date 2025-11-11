@@ -19,6 +19,8 @@ def extractExpr? (target expr : Expr) : GoalM (Option Expr) := do
     else
       return none
   firstInEqc? target fun e => do
+    -- TODO: We might be careful to reset any assignments performed by isDefEq, as not to hinder the
+    --       possibility of later assignments of sketches' holes.
     if ← (return !e.isFalse) <&&> isDefEq expr e then
       return e
     else
@@ -32,5 +34,10 @@ def extract? (target : Expr) : Sketch → GoalM (Option Expr)
   | .expr e => do
     let e ← shareCommon e
     extractExpr? target e
+  | .or lhs rhs => do
+    if let some ex ← extract? target lhs then
+      return ex
+    else
+      extract? target rhs
   | _ =>
-    throwError "`grind extract` currently only supports the `min_ast` and expression sketches"
+    throwError "`grind extract` does not currently support `[]ₛ` or nested (application) sketches"

@@ -142,6 +142,72 @@ example : P 1 2 3 := by
 
 end MVarTranslation
 
+/--
+warning: `grind` succeeded, extraction is redundant
+---
+info: Try this:
+  [apply] grind [=> id_def]
+-/
+#guard_msgs in
+example : true = !false := by
+  grind [=> id_def] extract _
+
+/--
+info: Try this:
+  [apply] suffices «_ |ₛ _» : P 1 2 3 by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example : P 1 2 3 := by
+  grind extract _ |ₛ _
+
+/--
+info: Try this:
+  [apply] suffices «Q |ₛ _» : Q by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example : P 1 2 3 := by
+  grind extract Q |ₛ _
+
+/--
+info: Try this:
+  [apply] suffices «_ |ₛ Q» : P 1 2 3 by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example : P 1 2 3 := by
+  grind extract _ |ₛ Q
+
+/--
+info: Try this:
+  [apply] suffices «P 1 2 3 |ₛ Q» : P 1 2 3 by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h : P 1 2 3 = Q
+⊢ P 1 2 3
+-/
+#guard_msgs in
+example : P 1 2 3 := by
+  grind extract P 1 2 3 |ₛ Q
+
 -- BUG: Term has not been internalized.
 example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by
   grind extract min_ast
