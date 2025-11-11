@@ -16,18 +16,18 @@ theorem p_heq_q : P 1 2 3 ≍ Q := by
 
 /--
 info: Try this:
-  suffices «min_ast» : Q by grind [p_eq_q]
+  [apply] suffices «min_ast» : Q by grind [p_eq_q]
 ---
 error: unsolved goals
 ⊢ P 1 2 3
 -/
 #guard_msgs in
-example : P 1 2 3 := by
+theorem t : P 1 2 3 := by
   grind [p_eq_q] extract min_ast
 
 /--
 info: Try this:
-  suffices «min_ast» : Q by grind [p_heq_q]
+  [apply] suffices «min_ast» : Q by grind [p_heq_q]
 ---
 error: unsolved goals
 ⊢ P 1 2 3
@@ -42,7 +42,7 @@ variable (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q)
 
 /--
 info: Try this:
-  suffices «min_ast» : Q by grind
+  [apply] suffices «min_ast» : Q by grind
 ---
 error: unsolved goals
 P : Nat → Nat → Nat → Prop
@@ -56,7 +56,7 @@ example : P 1 2 3 := by
 
 /--
 info: Try this:
-  suffices «Q» : Q by grind
+  [apply] suffices «Q» : Q by grind
 ---
 error: unsolved goals
 P : Nat → Nat → Nat → Prop
@@ -70,7 +70,7 @@ example : P 1 2 3 := by
 
 /--
 info: Try this:
-  suffices «P 1 2 3» : P 1 2 3 by grind
+  [apply] suffices «P 1 2 3» : P 1 2 3 by grind
 ---
 error: unsolved goals
 P : Nat → Nat → Nat → Prop
@@ -84,7 +84,7 @@ example : P 1 2 3 := by
 
 /--
 info: Try this:
-  suffices «P _ _ _» : P 1 2 3 by grind
+  [apply] suffices «P _ _ _» : P 1 2 3 by grind
 ---
 error: unsolved goals
 P : Nat → Nat → Nat → Prop
@@ -106,7 +106,7 @@ opaque B : Prop
 -- on the negation of the goal.
 /--
 info: Try this:
-  suffices «A» : A by grind
+  [apply] suffices «A» : A by grind
 ---
 error: unsolved goals
 P : Nat → Nat → Nat → Prop
@@ -121,7 +121,7 @@ example (h : ¬B → B = A) : B := by
 
 end ReasonForUsingSuffices
 
--- BUG: Term has not been internalized (this might be a bug in `grind`).
+-- BUG: Term has not been internalized.
 example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by
   grind extract min_ast
 
