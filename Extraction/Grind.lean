@@ -39,13 +39,23 @@ def onFailure (target : MVarId) (sketch : Sketch) (oldFVars : Array Expr) :
   let some ex ← extract? target sketch | return none
   return exprFromGrind oldFVars newFVars ex
 
+protected inductive Result.Success where
+  /-- `grind` succeeded. -/
+  | grind
+  /-- `grind` failed and extraction succeeded. -/
+  | extraction (ex : Expr)
+
 protected inductive Result where
   /-- Neither `grind`, nor extraction succeeded. -/
   | failure (result : Grind.Result)
   /-- `grind` succeeded. -/
-  | success
-  /-- `grind` failed and extraction succeeded. -/
-  | extracted (ex : Expr)
+  | success (s : Extraction.Result.Success)
+
+abbrev Result.grind : Extraction.Result :=
+  .success .grind
+
+abbrev Result.extraction (ex : Expr) : Extraction.Result :=
+  .success (.extraction ex)
 
 -- Corresponds to `Lean.Meta.Grind.main`.
 protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
@@ -54,34 +64,36 @@ protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
     let oldFVars ← getLocalHyps
     GrindM.runAtGoal target params fun goal => do
       let failure? ← solve goal
-      let some failedGoal := failure? | return .success
+      let some failedGoal := failure? | return .grind
       let (ex?, _) ← GoalM.run failedGoal do onFailure target sketch oldFVars
       let some ex := ex? | return .failure (← mkResult params failure?)
-      return .extracted ex
+      return .extraction ex
 
 end Lean.Meta.Grind.Extraction
 
 namespace Lean.Elab.Tactic.Extraction
 
 -- Corresponds to `Lean.Meta.Grind.withProtectedMCtx`.
-def withProtectedMCtx (abstractProof : Bool) (mvarId : MVarId) (k : MVarId → TacticM Bool) :
-    TacticM Bool := do
+def withProtectedMCtx
+    (abstractProof : Bool) (mvarId : MVarId) (k : MVarId → TacticM Result.Success) :
+    TacticM Unit := do
   let mvarId ← mvarId.abstractMVars
   let mvarId ← mvarId.clearImplDetails
   tryCatchRuntimeEx (main mvarId) fun ex => do
     mvarId.admit
     throw ex
 where
-  main (mvarId : MVarId) : TacticM Bool := mvarId.withContext do
+  main (mvarId : MVarId) : TacticM Unit := mvarId.withContext do
     let type ← mvarId.getType
-    let proof? ← withNewMCtxDepth do
+    let proof? : Option Expr ← withNewMCtxDepth do
       let mvar' ← mkFreshExprSyntheticOpaqueMVar type
-      let extracted ← k mvar'.mvarId!
-      if extracted then return none
-      some <$> finalize mvar'
+      let success ← k mvar'.mvarId!
+      match success with
+      | .grind        => return ← finalize mvar'
+      | .extraction _ => return none
     if let some proof := proof? then
       mvarId.assign proof
-      return true
+      replaceMainGoal []
     else
       -- When calling `withProtectedMCtx`, the goal `mvarId` is immediately assigned by
       -- `abstractMVars` and `clearImplDetails` and is therefore not a goal from the point of view
@@ -89,7 +101,6 @@ where
       -- latter filters out assigned goals). We therefore need to push the (new/updated) goal mvar
       -- back onto the list goals.
       pushGoal mvarId
-      return false
   finalize (mvar' : Expr) : MetaM Expr := do
     trace[grind.debug.proof] "{← instantiateMVars mvar'}"
     let type ← inferType mvar'
@@ -113,20 +124,19 @@ def headToPrefix : TSyntax `grindExtractHead → TSyntax `grindExtractPrefix
   | `(grindExtractHead| $pre:grindExtractPrefix extract) => pre
   | _                                                    => unreachable!
 
--- TODO: How does one properly turn `Syntax` into `MessageData`?
+-- TODO: How does one properly turn `Syntax` into `MessageData` (instead of `.raw.prettyPrint`)?
 def grindSufficesSuggestion (ex : Expr) (sketch : Syntax) (pre : TSyntax `grindExtractPrefix) :
     TacticM TryThis.Suggestion := do
   let msg := m!"suffices «{sketch.prettyPrint}» : {← ppExpr ex} by {pre.raw.prettyPrint}"
   msg.toString
 
-def grindPlainSuggestion (pre : TSyntax `grindExtractPrefix) : TacticM TryThis.Suggestion := do
-  let msg := m!"{pre.raw.prettyPrint}"
-  msg.toString
+def grindPlainSuggestion (pre : TSyntax `grindExtractPrefix) : TryThis.Suggestion where
+  suggestion := .tsyntax pre
 
 -- Corresponds to `Lean.Elab.Tactic.grind`.
 protected def «grind»
     (mvarId : MVarId) (config : Grind.Config) (only : Bool) (ps : TSyntaxArray ``grindParam)
-    (head : TSyntax `grindExtractHead) (sketch : Term) : TacticM Bool := do
+    (head : TSyntax `grindExtractHead) (sketch : Term) : TacticM Unit := do
   if debug.terminalTacticsAsSorry.get (← getOptions) then
     mvarId.admit
   mvarId.withContext do
@@ -138,15 +148,15 @@ protected def «grind»
       match result with
       | .failure res =>
         throwError "`grind extract` failed\n{← res.toMessageData}"
-      | .success =>
+      | .success .grind =>
         logWarningAt head "`grind` succeeded, extraction is redundant"
-        let suggestion ← grindPlainSuggestion pre
+        let suggestion := grindPlainSuggestion pre
         Tactic.TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
-        return false
-      | .extracted ex =>
+        return .grind
+      | .success (.extraction ex) =>
         let suggestion ← grindSufficesSuggestion ex sketch pre
         Tactic.TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
-        return true
+        return .extraction ex
 
 -- Corresponds to `Lean.Elab.Tactic.evalGrindCore`.
 protected def evalGrindCore
@@ -158,8 +168,7 @@ protected def evalGrindCore
   if Grind.grind.warning.get (← getOptions) then
     logWarningAt head "The `grind` tactic is new and its behavior may change in the future. This project has used `set_option grind.warning true` to discourage its use."
   withMainContext do
-    let success ← Extraction.grind (← getMainGoal) config only params head sketch
-    if success then replaceMainGoal []
+    Extraction.grind (← getMainGoal) config only params head sketch
 
 syntax (name := Parser.Tactic.grindExtract) grindExtractHead term : tactic
 

@@ -22,7 +22,7 @@ error: unsolved goals
 ⊢ P 1 2 3
 -/
 #guard_msgs in
-theorem t : P 1 2 3 := by
+example : P 1 2 3 := by
   grind [p_eq_q] extract min_ast
 
 /--
