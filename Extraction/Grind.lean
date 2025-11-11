@@ -8,10 +8,6 @@ open Lean Meta Elab Parser Tactic Grind Extraction
 
 namespace Lean.Meta.Grind.Extraction
 
-protected inductive Result where
-  | extracted (ex : Expr)
-  | grind (result : Grind.Result)
-
 -- Note: The replacement of fvars may be sketchy, as while `grind` sets `preserveOrder := true` when
 --       calling `revertAll`, I'm not sure if there are other aspects which may affect the order of
 --       fvars in `grind`'s local context. For example, does `intros` preserve the order?
@@ -43,6 +39,14 @@ def onFailure (target : MVarId) (sketch : Sketch) (oldFVars : Array Expr) :
   let some ex ← extract? target sketch | return none
   return exprFromGrind oldFVars newFVars ex
 
+protected inductive Result where
+  /-- `grind` succeeded. -/
+  | grind (result : Grind.Result)
+  /-- `grind` failed and extraction succeeded. -/
+  | extracted (ex : Expr)
+  /-- Neither `grind`, nor extraction succeeded. -/
+  | failure (result : Grind.Result)
+
 -- Corresponds to `Lean.Meta.Grind.main`.
 protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
     MetaM Extraction.Result := do
@@ -50,12 +54,10 @@ protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
     let oldFVars ← getLocalHyps
     GrindM.runAtGoal target params fun goal => do
       let failure? ← solve goal
-      if let some failedGoal := failure? then
-        let (ex?, _) ← GoalM.run failedGoal do
-          onFailure target sketch oldFVars
-        if let some ex := ex? then
-          return .extracted ex
-      return .grind (← mkResult params failure?)
+      let some failedGoal := failure? | return .grind (← mkResult params failure?)
+      let (ex?, _) ← GoalM.run failedGoal do onFailure target sketch oldFVars
+      let some ex := ex? | return .failure (← mkResult params failure?)
+      return .extracted ex
 
 end Lean.Meta.Grind.Extraction
 
@@ -74,7 +76,7 @@ protected def grind
     let mvar' ← mkFreshExprSyntheticOpaqueMVar type
     let finalize (result : Grind.Result) : TacticM Unit := do
       if result.hasFailed then
-        throwError "`grind` failed\n{← result.toMessageData}"
+        throwError "`grind extract` failed\n{← result.toMessageData}"
       trace[grind.debug.proof] "{← instantiateMVars mvar'}"
       -- `grind` proofs are often big, if `abstractProof` is true, we create an auxiliary theorem.
       let e ← if !config.abstractProof then
@@ -87,11 +89,11 @@ protected def grind
       mvarId.assign e
     let result ← Extraction.main mvar'.mvarId! params sketch
     match result with
-    | .extracted ex =>
-      return ex
-    | .grind result =>
+    | .grind result | .failure result =>
       finalize result
       return none
+    | .extracted ex =>
+      return ex
 
 declare_syntax_cat grindExtractPrefix
 syntax "grind" optConfig (&" only")? (" [" withoutPosition(grindParam,*) "]")? : grindExtractPrefix
@@ -119,7 +121,6 @@ protected def evalGrindCore
   withMainContext do
     let sk ← Sketch.elabSketch sketch
     let ex? ← Extraction.grind (← getMainGoal) config only params sk
-    -- TODO: Have a better handling for when extraction fails.
     let some ex := ex? | replaceMainGoal []
     let suggestion ← mkGrindSuffices ex sketch head
     Tactic.TryThis.addSuggestion head suggestion (origSpan? := ← getRef)

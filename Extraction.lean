@@ -121,6 +121,10 @@ example (h : ¬B → B = A) : B := by
 
 end ReasonForUsingSuffices
 
--- BUG: Term has not been internalized.
+-- BUG: Term has not been internalized (this might be a bug in `grind`).
 example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by
   grind extract min_ast
+
+-- BUG: isDefEq fails on all comparisons to _ (that is, ?m.12345)
+example : P 1 2 3 := by
+  grind extract _
