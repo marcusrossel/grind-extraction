@@ -8,13 +8,17 @@ open Lean Meta Elab Parser Tactic Grind Extraction
 
 namespace Lean.Meta.Grind.Extraction
 
+-- **TODO** The way we transfer `Expr`s to `grind`'s context is out of date. In particular, while we
+--          now assume that `config.revert = false`, there are other preprocessing steps. See,
+--          `Lean.Meta.Grind.initCore`.
+
 -- Note: The replacement of fvars may be sketchy, as while `grind` sets `preserveOrder := true` when
 --       calling `revertAll`, I'm not sure if there are other aspects which may affect the order of
 --       fvars in `grind`'s local context. For example, does `intros` preserve the order?
 def exprToGrind (oldFVars newFVars : Array Expr) (e : Expr) : MetaM Expr := do
   let e ← mvarsToGrind e
   let e := e.replaceFVars oldFVars (newFVars.take oldFVars.size)
-  let e ← Grind.unfoldReducible e
+  -- **OUTDATED** let e ← Grind.unfoldReducible e
   Core.betaReduce e
 where
   mvarsToGrind (e : Expr) : MetaM Expr := do
@@ -72,13 +76,22 @@ abbrev Result.extraction (ex : Expr) : Extraction.Result :=
 protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
     MetaM Extraction.Result := do
   profileitM Exception "grind" (← getOptions) do
+    let params :=
+      if grind.unusedLemmaThreshold.get (← getOptions) > 0 then
+        { params with config.markInstances := true }
+      else
+        params
     let oldFVars ← getLocalHyps
     GrindM.runAtGoal target params fun goal => do
       let failure? ← solve goal
-      let some failedGoal := failure? | return .grind
-      let (ex?, _) ← GoalM.run failedGoal do onFailure target sketch oldFVars
-      let some ex := ex? | return .failure (← mkResult params failure?)
-      return .extraction ex
+      let result ← mkResult params failure?
+      if let some failedGoal := failure? then
+        let (ex?, _) ← GoalM.run failedGoal do onFailure target sketch oldFVars
+        let some ex := ex? | return .failure result
+        return .extraction ex
+      else
+        checkUnusedActivations target result.counters
+        return .grind
 
 end Lean.Meta.Grind.Extraction
 
@@ -86,10 +99,10 @@ namespace Lean.Elab.Tactic.Extraction
 
 -- Corresponds to `Lean.Meta.Grind.withProtectedMCtx`.
 def withProtectedMCtx
-    (abstractProof : Bool) (mvarId : MVarId) (k : MVarId → TacticM Result.Success) :
+    (config : Grind.Config) (mvarId : MVarId) (k : MVarId → TacticM Result.Success) :
     TacticM Unit := do
-  let mvarId ← mvarId.abstractMVars
-  let mvarId ← mvarId.clearImplDetails
+  let mvarId ← mvarId.instantiateGoalMVars
+  -- **Note** we assume `config.revert = false`.
   tryCatchRuntimeEx (main mvarId) fun ex => do
     mvarId.admit
     throw ex
@@ -100,29 +113,36 @@ where
       let mvar' ← mkFreshExprSyntheticOpaqueMVar type
       let success ← k mvar'.mvarId!
       match success with
-      | .grind        => return ← finalize mvar'
+      | .grind =>
+        let val ← instantiateMVarsProfiling mvar'
+         -- **TODO**
+         -- This is private: let val ← resolveDelayedMVarAssignments val
+         -- However, when `grind` succeeds, we don't actually need to thread the resulting proof
+         -- through, do we? We want the user anyway that extraction is irrelevant in this case, and
+         -- they should replay `grind extract` with `grind`.
+        finalize val
       | .extraction _ => return none
     if let some proof := proof? then
       mvarId.assign proof
       replaceMainGoal []
     else /- if extracted -/
       -- When calling `withProtectedMCtx`, the goal `mvarId` is immediately assigned by
-      -- `abstractMVars` and `clearImplDetails` and is therefore not a goal from the point of view
-      -- of `TacticM` anymore (it still shows up in `getGoals`, but not in `getMainGoal`, as the
-      -- latter filters out assigned mvars). We therefore need to push the (new/updated) goal mvar
-      -- back onto the list of goals.
+      -- `instantiateGoalMVars` and is therefore not a goal from the point of view of `TacticM`
+      -- anymore (it still shows up in `getGoals`, but not in `getMainGoal`, as the latter filters
+      -- out assigned mvars). We therefore need to push the (new/updated) goal mvar back onto the
+      -- list of goals.
       pushGoal mvarId
-  finalize (mvar' : Expr) : MetaM Expr := do
-    trace[grind.debug.proof] "{← instantiateMVars mvar'}"
-    let type ← inferType mvar'
+  finalize (val : Expr) : MetaM Expr := do
+    trace[grind.debug.proof] "{val}"
+    let type ← inferType val
     -- `grind` proofs are often big, if `abstractProof` is true, we create an auxiliary theorem.
-    let val ← if !abstractProof then
-      instantiateMVarsProfiling mvar'
+    let val ← if config.abstractProof then
+      pure val
     else if (← isProp type) then
-      mkAuxTheorem type (← instantiateMVarsProfiling mvar') (zetaDelta := true)
+      mkAuxTheorem type val (zetaDelta := true)
     else
       let auxName ← mkAuxDeclName `grind
-      mkAuxDefinition auxName type (← instantiateMVarsProfiling mvar') (zetaDelta := true)
+      mkAuxDefinition auxName type val (zetaDelta := true)
     return val
 
 declare_syntax_cat grindExtractPrefix
@@ -144,11 +164,10 @@ def grindPlainSuggestion (pre : TSyntax `grindExtractPrefix) : TryThis.Suggestio
 protected def «grind»
     (mvarId : MVarId) (config : Grind.Config) (only : Bool) (ps : TSyntaxArray ``grindParam)
     (head : TSyntax `grindExtractHead) (sketch : Term) : TacticM Unit := do
-  if debug.terminalTacticsAsSorry.get (← getOptions) then
-    mvarId.admit
+  if (← checkTerminalAsSorry mvarId) then return ()
   mvarId.withContext do
     let params ← mkGrindParams config only ps mvarId
-    withProtectedMCtx config.abstractProof mvarId fun mvarId' => do
+    withProtectedMCtx config mvarId fun mvarId' => do
       let s ← Sketch.elabSketch sketch
       let result ← Extraction.main mvarId' params s
       let `(grindExtractHead| $pre:grindExtractPrefix extract) := head | unreachable!
@@ -180,11 +199,13 @@ protected def evalGrindCore
 syntax (name := Parser.Tactic.grindExtract) grindExtractHead term : tactic
 
 -- Corresponds to `Lean.Elab.Tactic.evalGrind`.
-@[tactic Parser.Tactic.grindExtract] def evalGrind : Tactic
+@[tactic Parser.Tactic.grindExtract] def evalGrind : Tactic := fun stx => do
+  recordExtraModUse (isMeta := false) `Init.Grind.Tactics
+  match stx with
   | `(tactic| $head:grindExtractHead $sketch:term) => do
     match head with
     | `(grindExtractHead| grind $config:optConfig $[only%$only]? $[[$params:grindParam,*]]? extract) =>
       let config ← elabGrindConfig config
-      discard <| Extraction.evalGrindCore head sketch config only params
+      Extraction.evalGrindCore head sketch config only params
     | _ => throwUnsupportedSyntax
   | _ => throwUnsupportedSyntax
