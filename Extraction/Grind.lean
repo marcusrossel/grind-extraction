@@ -33,6 +33,7 @@ def Sketch.toGrind (oldFVars newFVars : Array Expr) (sketch : Sketch) : MetaM Sk
   | contains sketch => return contains (← sketch.toGrind oldFVars newFVars)
   | or lhs rhs      => return or (← lhs.toGrind oldFVars newFVars) (← rhs.toGrind oldFVars newFVars)
   | minAST          => return minAST
+  | debug           => return debug
 
 -- TODO: We just translate the fvars back naively for now, as our goal is first to test different
 --       kinds of extraction, so it's ok if this fails sometimes.

@@ -80,7 +80,7 @@ h : P 1 2 3 = Q
 -/
 #guard_msgs in
 example : P 1 2 3 := by
-  grind extract P 1 2 3
+  grind extract P 1 2 3 -- TODO: There's probably special handling for `OfNat` in grind.
 
 /--
 info: Try this:
@@ -103,7 +103,8 @@ opaque B : Prop
 
 -- We use `suffices` for "proof construction", as if we used `have` or direct proof replacement, we
 -- couldn't handle cases where the proof of equality between the goal and the extracted term depends
--- on the negation of the goal.
+-- on the negation of the goal. By using `suffices`, we instead add the missing assumption *into*
+-- grind's context.
 /--
 info: Try this:
   [apply] suffices «A» : A by grind
@@ -207,6 +208,21 @@ h : P 1 2 3 = Q
 #guard_msgs in
 example : P 1 2 3 := by
   grind extract P 1 2 3 |ₛ Q
+
+section SubtermsAndInternalization
+
+example (p : Nat → Prop) (a b : Nat) (f : Nat → Nat) (h : f a = b) : p (f a) := by
+  grind extract p b
+
+end SubtermsAndInternalization
+
+-- BUG: Our extraction does not consider subterms properly.
+example (f g : Nat → Nat) (a b : Nat) (h : g a = b) : f (g a) = 0 := by
+  grind extract min_ast
+
+-- BUG: Our extraction does not consider subterms properly.
+example (f g : Nat → Nat) (a b : Nat) (h : g a = b) : f (g a) = 0 := by
+  grind extract f b = 0
 
 -- BUG: Term has not been internalized.
 example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by

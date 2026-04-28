@@ -10,6 +10,7 @@ inductive Meta.Grind.Extraction.Sketch where
   | contains (sketch : Sketch)
   | or (lhs rhs : Sketch)
   | minAST
+  | debug
 
 namespace KVMap
 
@@ -17,6 +18,7 @@ private def sketchContainsKey := `sketchContainsKey
 private def sketchOrLhsKey    := `sketchOrLhsKey
 private def sketchOrRhsKey    := `sketchOrRhsKey
 private def sketchMinASTKey   := `sketchMinASTKey
+private def sketchDebugKey    := `sketchDebugKey
 
 def mkContainsSketch (t : Term) : KVMap :=
   { : KVMap }.setSyntax sketchContainsKey t
@@ -26,6 +28,9 @@ def mkOrSketch (lhs rhs : Term) : KVMap :=
 
 def mkMinASTSketch (ref : Syntax) : KVMap :=
   { : KVMap } |>.setSyntax sketchMinASTKey ref
+
+def mkDebugSketch (ref : Syntax) : KVMap :=
+  { : KVMap } |>.setSyntax sketchDebugKey ref
 
 def containsSketchKey (kv : KVMap) : Bool :=
   kv.contains sketchContainsKey
@@ -57,16 +62,22 @@ def MData.getMinASTSketch? (data : MData) : Option Syntax := do
   let some (.ofSyntax ref) := data.find KVMap.sketchMinASTKey | none
   ref
 
+def MData.getDebugSketch? (data : MData) : Option Syntax := do
+  let some (.ofSyntax ref) := data.find KVMap.sketchDebugKey | none
+  ref
+
 namespace Meta.Grind.Extraction.Sketch
 
 syntax "[" term "]ₛ" : term        -- Sketch.contains
 syntax:min term " |ₛ " term : term -- Sketch.or
 syntax "min_ast" : term            -- Sketch.minAST
+syntax "dbg" : term                -- Sketch.debug
 
 elab_rules : term
   | `([$t:term]ₛ)             => return .mdata (KVMap.mkContainsSketch t) (← mkFreshExprMVar none)
   | `($lhs:term |ₛ $rhs:term) => return .mdata (KVMap.mkOrSketch lhs rhs) (← mkFreshExprMVar none)
   | `(min_ast%$ref)           => return .mdata (KVMap.mkMinASTSketch ref) (← mkFreshExprMVar none)
+  | `(dbg%$ref)               => return .mdata (KVMap.mkDebugSketch ref) (← mkFreshExprMVar none)
 
 -- TODO: We should probably normalize things with `grind`'s normalization procedure, if we want to
 --       hope to find expressions in the e-graph. For example, I think `grind` ζ-reduces.
@@ -89,6 +100,8 @@ where
         return .or lhs rhs
       if let some _ := data.getMinASTSketch? then
         return .minAST
+      if let some _ := data.getDebugSketch? then
+        return .debug
       return .expr e
     | .app fn arg =>
       -- This check normalizes our sketch representation, such that we don't introduce unnecessary
@@ -116,6 +129,7 @@ def format : Sketch → Format
   | contains sketch      => "[" ++ format sketch ++ "]ₛ"
   | or sketch₁ sketch₂   => format sketch₁ ++ " |ₛ " ++ format sketch₂
   | minAST               => "min_ast"
+  | debug                => "debug"
 
 instance : Std.ToFormat Sketch where
   format := Sketch.format

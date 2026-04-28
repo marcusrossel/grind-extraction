@@ -12,8 +12,9 @@ def mkEqHEqMP (eqHEqProof pr : Expr) : MetaM Expr := do
   let type ← inferType eqHEqProof
   if type.isEq then mkEqMP eqHEqProof pr else mkHEqMP eqHEqProof pr
 
-@[inline] def Grind.firstInEqc? (rep : Expr) (f : Expr → GoalM (Option Expr)) :
-    GoalM (Option Expr) := do
+namespace Grind
+
+@[inline] def firstInEqc? (rep : Expr) (f : Expr → GoalM (Option α)) : GoalM (Option α) := do
   let mut curr := rep
   repeat
     let node ← getENode curr
@@ -22,3 +23,11 @@ def mkEqHEqMP (eqHEqProof pr : Expr) : MetaM Expr := do
     curr := node.next
     if isSameExpr curr rep then break
   return none
+
+@[inline] def anyInEqc? (rep : Expr) (p : Expr → GoalM Bool) : GoalM Bool := do
+  let any? ← firstInEqc? rep fun e => do
+    if ← p e then
+      return some ()
+    else
+      return none
+  return any?.isSome
