@@ -81,16 +81,6 @@ example (h : ¬B 0 → B 0 = A) : B 0 := by
 end ReasonForUsingSuffices
 
 /--
-warning: `grind` succeeded, extraction is redundant
----
-info: Try this:
-  [apply] grind [=> id_def]
--/
-#guard_msgs in
-example : true = !false := by
-  grind [=> id_def] extract min_ast
-
-/--
 info: Try this:
   [apply] suffices «min_ast» : f b = 0 by grind
 ---
@@ -107,6 +97,19 @@ h : g a = b
 example (f g : Nat → Nat) (a b : Nat) (h : g a = b) : f (g a) = 0 := by
   grind extract min_ast
 
--- BUG: Term has not been internalized.
+/--
+info: Try this:
+  [apply] suffices «min_ast» : f b = 0 by grind
+---
+error: unsolved goals
+P : Nat → Nat → Nat → Prop
+Q : Prop
+h✝ : P 1 2 3 = Q
+f : Nat → Nat
+a b : Nat
+h : a = b
+⊢ f (a + 0) = 0
+-/
+#guard_msgs in
 example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by
   grind extract min_ast

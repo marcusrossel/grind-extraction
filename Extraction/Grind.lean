@@ -2,8 +2,9 @@ import Extraction.Core
 import Extraction.Lean
 open Lean Meta Elab Parser Tactic Grind Extraction
 
-/- This file defines the uninteresting part of the `grind extract` elaborator, which mainly consists
-   of slight modifications to high-level functions of (vanilla) grind's elaborator.
+/-
+This file defines the uninteresting part of the `grind extract` elaborator, which mainly consists of
+slight modifications to high-level functions of (vanilla) grind's elaborator.
 -/
 
 namespace Lean.Meta.Grind.Extraction
@@ -11,15 +12,11 @@ namespace Lean.Meta.Grind.Extraction
 -- **TODO** The way we transfer `Expr`s to `grind`'s context is out of date. In particular, while we
 --          now assume that `config.revert = false`, there are other preprocessing steps. See,
 --          `Lean.Meta.Grind.initCore`.
-
--- Note: The replacement of fvars may be sketchy, as while `grind` sets `preserveOrder := true` when
---       calling `revertAll`, I'm not sure if there are other aspects which may affect the order of
---       fvars in `grind`'s local context. For example, does `intros` preserve the order?
-def exprToGrind (oldFVars newFVars : Array Expr) (e : Expr) : MetaM Expr := do
+def exprToGrind (oldFVars newFVars : Array Expr) (e : Expr) : GoalM Expr := do
   let e ← mvarsToGrind e
   let e := e.replaceFVars oldFVars (newFVars.take oldFVars.size)
-  -- **OUTDATED** let e ← Grind.unfoldReducible e
-  Core.betaReduce e
+  let { expr, .. } ← preprocess e
+  return expr
 where
   mvarsToGrind (e : Expr) : MetaM Expr := do
     let { expr, mvars, .. } ← Meta.abstractMVars e (levels := false)
@@ -30,7 +27,7 @@ where
       e := mkApp e fresh
     return e
 
-def Sketch.toGrind (oldFVars newFVars : Array Expr) (sketch : Sketch) : MetaM Sketch := do
+def Sketch.toGrind (oldFVars newFVars : Array Expr) (sketch : Sketch) : GoalM Sketch := do
   match sketch with
   | expr e          => return expr (← exprToGrind oldFVars newFVars e)
   | app fn arg      => return app (← fn.toGrind oldFVars newFVars) (← arg.toGrind oldFVars newFVars)
@@ -49,28 +46,17 @@ def onFailure (target : MVarId) (sketch : Sketch) (oldFVars : Array Expr) :
   let newFVars ← getLocalHyps
   let target ← target.getType
   let target ← exprToGrind oldFVars newFVars target
-  let target ← shareCommon target
   let sketch ← sketch.toGrind oldFVars newFVars
   let some ex ← extract? target sketch | return none
   return exprFromGrind oldFVars newFVars ex
-
-protected inductive Result.Success where
-  /-- `grind` succeeded. -/
-  | grind
-  /-- `grind` failed and extraction succeeded. -/
-  | extraction (ex : Expr)
 
 protected inductive Result where
   /-- Neither `grind`, nor extraction succeeded. -/
   | failure (result : Grind.Result)
   /-- `grind` succeeded. -/
-  | success (s : Extraction.Result.Success)
-
-abbrev Result.grind : Extraction.Result :=
-  .success .grind
-
-abbrev Result.extraction (ex : Expr) : Extraction.Result :=
-  .success (.extraction ex)
+  | grind
+  /-- `grind` failed and extraction succeeded. -/
+  | extraction (ex : Expr)
 
 -- Corresponds to `Lean.Meta.Grind.main`.
 protected def main (target : MVarId) (params : Params) (sketch : Sketch) :
@@ -97,53 +83,21 @@ end Lean.Meta.Grind.Extraction
 
 namespace Lean.Elab.Tactic.Extraction
 
--- Corresponds to `Lean.Meta.Grind.withProtectedMCtx`.
-def withProtectedMCtx
-    (config : Grind.Config) (mvarId : MVarId) (k : MVarId → TacticM Result.Success) :
-    TacticM Unit := do
+-- Corresponds to `Lean.Meta.Grind.withProtectedMCtx`, except that when `grind` succeeds we do not
+-- realize the proof, as we show a warning that `grind extract` in redundant in this case anyway.
+def withProtectedMCtx (mvarId : MVarId) (k : MVarId → TacticM Unit) : TacticM Unit := do
   let mvarId ← mvarId.instantiateGoalMVars
   -- **Note** we assume `config.revert = false`.
   tryCatchRuntimeEx (main mvarId) fun ex => do
     mvarId.admit
     throw ex
+  pushGoal mvarId
 where
   main (mvarId : MVarId) : TacticM Unit := mvarId.withContext do
     let type ← mvarId.getType
-    let proof? : Option Expr ← withNewMCtxDepth do
+    withNewMCtxDepth do
       let mvar' ← mkFreshExprSyntheticOpaqueMVar type
-      let success ← k mvar'.mvarId!
-      match success with
-      | .grind =>
-        let val ← instantiateMVarsProfiling mvar'
-         -- **TODO**
-         -- This is private: let val ← resolveDelayedMVarAssignments val
-         -- However, when `grind` succeeds, we don't actually need to thread the resulting proof
-         -- through, do we? We want the user anyway that extraction is irrelevant in this case, and
-         -- they should replay `grind extract` with `grind`.
-        finalize val
-      | .extraction _ => return none
-    if let some proof := proof? then
-      mvarId.assign proof
-      replaceMainGoal []
-    else /- if extracted -/
-      -- When calling `withProtectedMCtx`, the goal `mvarId` is immediately assigned by
-      -- `instantiateGoalMVars` and is therefore not a goal from the point of view of `TacticM`
-      -- anymore (it still shows up in `getGoals`, but not in `getMainGoal`, as the latter filters
-      -- out assigned mvars). We therefore need to push the (new/updated) goal mvar back onto the
-      -- list of goals.
-      pushGoal mvarId
-  finalize (val : Expr) : MetaM Expr := do
-    trace[grind.debug.proof] "{val}"
-    let type ← inferType val
-    -- `grind` proofs are often big, if `abstractProof` is true, we create an auxiliary theorem.
-    let val ← if config.abstractProof then
-      pure val
-    else if (← isProp type) then
-      mkAuxTheorem type val (zetaDelta := true)
-    else
-      let auxName ← mkAuxDeclName `grind
-      mkAuxDefinition auxName type val (zetaDelta := true)
-    return val
+      k mvar'.mvarId!
 
 declare_syntax_cat grindExtractPrefix
 syntax "grind" optConfig (&" only")? (" [" withoutPosition(grindParam,*) "]")? : grindExtractPrefix
@@ -167,22 +121,21 @@ protected def «grind»
   if (← checkTerminalAsSorry mvarId) then return ()
   mvarId.withContext do
     let params ← mkGrindParams config only ps mvarId
-    withProtectedMCtx config mvarId fun mvarId' => do
-      let s ← Sketch.elabSketch sketch
-      let result ← Extraction.main mvarId' params s
+    withProtectedMCtx mvarId fun mvarId' => do
+      -- **TODO** let s ← Sketch.elabSketch sketch
+      -- Note, when activated, this currently produces an unknown mvar RPC error in the info view.
+      let result ← Extraction.main mvarId' params /- s -/ .minAST
       let `(grindExtractHead| $pre:grindExtractPrefix extract) := head | unreachable!
       match result with
       | .failure res =>
         throwError "`grind extract` failed\n{← res.toMessageData}"
-      | .success .grind =>
+      | .grind =>
         logWarningAt head "`grind` succeeded, extraction is redundant"
         let suggestion := grindPlainSuggestion pre
         TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
-        return .grind
-      | .success (.extraction ex) =>
+      | .extraction ex =>
         let suggestion ← grindSufficesSuggestion ex sketch pre
         TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
-        return .extraction ex
 
 -- Corresponds to `Lean.Elab.Tactic.evalGrindCore`.
 protected def evalGrindCore

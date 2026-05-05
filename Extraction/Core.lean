@@ -42,7 +42,7 @@ partial def extractMinAST (target : Expr) : GoalM Expr := do
   return expr
 where
   go (target : SizedExpr) (threshold : Nat) : GoalM (Option SizedExpr) := do
-    foldEqc target.expr target fun node best? => do
+    foldEqc target.expr none fun node best? => do
       let expr := node.self
       if expr.isFalse then return best?
       -- **TODO** How are children of other kinds of expressions to be handled? In particular, `.lam` and `.forallE`.
