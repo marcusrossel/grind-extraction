@@ -12,9 +12,8 @@ namespace Lean.Meta.Grind.Extraction
 -- **TODO** The way we transfer `Expr`s to `grind`'s context is out of date. In particular, while we
 --          now assume that `config.revert = false`, there are other preprocessing steps. See,
 --          `Lean.Meta.Grind.initCore`.
-def exprToGrind (oldFVars newFVars : Array Expr) (e : Expr) : GoalM Expr := do
+def exprToGrind (e : Expr) : GoalM Expr := do
   let e ← mvarsToGrind e
-  let e := e.replaceFVars oldFVars (newFVars.take oldFVars.size)
   let { expr, .. } ← preprocess e
   return expr
 where
@@ -27,12 +26,12 @@ where
       e := mkApp e fresh
     return e
 
-def Sketch.toGrind (oldFVars newFVars : Array Expr) (sketch : Sketch) : GoalM Sketch := do
+def Sketch.toGrind (sketch : Sketch) : GoalM Sketch := do
   match sketch with
-  | expr e          => return expr (← exprToGrind oldFVars newFVars e)
-  | app fn arg      => return app (← fn.toGrind oldFVars newFVars) (← arg.toGrind oldFVars newFVars)
-  | contains sketch => return contains (← sketch.toGrind oldFVars newFVars)
-  | or lhs rhs      => return or (← lhs.toGrind oldFVars newFVars) (← rhs.toGrind oldFVars newFVars)
+  | expr e          => return expr (← exprToGrind e)
+  | app fn arg      => return app (← fn.toGrind) (← arg.toGrind)
+  | contains sketch => return contains (← sketch.toGrind)
+  | or lhs rhs      => return or (← lhs.toGrind) (← rhs.toGrind)
   | minAST          => return minAST
   | debug           => return debug
 
@@ -44,9 +43,11 @@ def exprFromGrind (oldFVars newFVars : Array Expr) (e : Expr) : Expr :=
 def onFailure (target : MVarId) (sketch : Sketch) (oldFVars : Array Expr) :
     GoalM (Option Expr) := do
   let newFVars ← getLocalHyps
+  -- **TODO** Since grind doesn't revert the context anymore, can't we grab the goal (target)
+  --          directly from grind's mvar?
   let target ← target.getType
-  let target ← exprToGrind oldFVars newFVars target
-  let sketch ← sketch.toGrind oldFVars newFVars
+  let target ← exprToGrind target
+  let sketch ← sketch.toGrind
   let some ex ← extract? target sketch | return none
   return exprFromGrind oldFVars newFVars ex
 
@@ -122,17 +123,17 @@ protected def «grind»
   mvarId.withContext do
     let params ← mkGrindParams config only ps mvarId
     withProtectedMCtx mvarId fun mvarId' => do
-      -- **TODO** let s ← Sketch.elabSketch sketch
-      -- Note, when activated, this currently produces an unknown mvar RPC error in the info view.
-      let result ← Extraction.main mvarId' params /- s -/ .minAST
+      -- **TODO?** Sketch elaboration.
+      -- let .minAST ← Sketch.elabSketch sketch | throwError "Only the `min_ast` sketch is supported."
+      let result ← Extraction.main mvarId' params .minAST
       let `(grindExtractHead| $pre:grindExtractPrefix extract) := head | unreachable!
       match result with
       | .failure res =>
         throwError "`grind extract` failed\n{← res.toMessageData}"
       | .grind =>
-        logWarningAt head "`grind` succeeded, extraction is redundant"
         let suggestion := grindPlainSuggestion pre
-        TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
+        let header := "Try this (`grind` succeeded, extraction is redundant):"
+        TryThis.addSuggestion head suggestion (origSpan? := ← getRef) (header := header)
       | .extraction ex =>
         let suggestion ← grindSufficesSuggestion ex sketch pre
         TryThis.addSuggestion head suggestion (origSpan? := ← getRef)

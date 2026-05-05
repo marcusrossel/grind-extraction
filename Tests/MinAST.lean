@@ -17,22 +17,16 @@ theorem p_heq_q : P 1 2 3 ≍ Q := by
 /--
 info: Try this:
   [apply] suffices «min_ast» : Q by grind [p_eq_q]
----
-error: unsolved goals
-⊢ P 1 2 3
 -/
-#guard_msgs in
+#guard_msgs(info, drop error) in
 example : P 1 2 3 := by
   grind [p_eq_q] extract min_ast
 
 /--
 info: Try this:
   [apply] suffices «min_ast» : Q by grind [p_heq_q]
----
-error: unsolved goals
-⊢ P 1 2 3
 -/
-#guard_msgs in
+#guard_msgs(info, drop error) in
 example : P 1 2 3 := by
   grind [p_heq_q] extract min_ast
 
@@ -43,14 +37,8 @@ variable (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q)
 /--
 info: Try this:
   [apply] suffices «min_ast» : Q by grind
----
-error: unsolved goals
-P : Nat → Nat → Nat → Prop
-Q : Prop
-h : P 1 2 3 = Q
-⊢ P 1 2 3
 -/
-#guard_msgs in
+#guard_msgs(info, drop error) in
 example : P 1 2 3 := by
   grind extract min_ast
 
@@ -66,50 +54,41 @@ opaque B : Nat → Prop
 /--
 info: Try this:
   [apply] suffices «min_ast» : A by grind
----
-error: unsolved goals
-P : Nat → Nat → Nat → Prop
-Q : Prop
-h✝ : P 1 2 3 = Q
-h : ¬B 0 → B 0 = A
-⊢ B 0
 -/
-#guard_msgs in
+#guard_msgs(info, drop error) in
 example (h : ¬B 0 → B 0 = A) : B 0 := by
   grind extract min_ast
 
 end ReasonForUsingSuffices
 
 /--
+info: Try this (`grind` succeeded, extraction is redundant):
+  [apply] grind [=> id_def]
+-/
+#guard_msgs(info, drop error) in
+example : true = !false := by
+  grind [=> id_def] extract min_ast
+
+/--
 info: Try this:
   [apply] suffices «min_ast» : f b = 0 by grind
----
-error: unsolved goals
-P : Nat → Nat → Nat → Prop
-Q : Prop
-h✝ : P 1 2 3 = Q
-f g : Nat → Nat
-a b : Nat
-h : g a = b
-⊢ f (g a) = 0
 -/
-#guard_msgs in
-example (f g : Nat → Nat) (a b : Nat) (h : g a = b) : f (g a) = 0 := by
+#guard_msgs(info, drop error) in
+example (f g : Nat → Nat) (h : g a = b) : f (g a) = 0 := by
   grind extract min_ast
 
 /--
 info: Try this:
   [apply] suffices «min_ast» : f b = 0 by grind
----
-error: unsolved goals
-P : Nat → Nat → Nat → Prop
-Q : Prop
-h✝ : P 1 2 3 = Q
-f : Nat → Nat
-a b : Nat
-h : a = b
-⊢ f (a + 0) = 0
 -/
-#guard_msgs in
-example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by
+#guard_msgs(info, drop error) in
+example (f : Nat → Nat) (h : a = b) : f (a + 0) = 0 := by
   grind extract min_ast
+
+-- **TODO** This should at least find the smaller term `f (a + a + a) = 0`.
+example (f : Nat → Nat) (h₁ : a = b) (h₂ : b = c) (h₃ : c = d) (h₄ : d = e)
+    (h₅ : f a = 0) : f (a + (f b) + c + (f d) + e) = 0 := by
+  grind extract min_ast
+
+-- **TODO!** Add tracing to min_ast extraction, so we can see which terms were weighted how heavily,
+--           and which were skipped entirely.

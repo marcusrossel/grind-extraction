@@ -1,58 +1,7 @@
 import Extraction.Grind
 
-section NoFVars
-
-inductive P : Nat → Nat → Nat → Prop
-  | intro : P 1 2 3
-
-inductive Q : Prop
-  | intro
-
-theorem p_eq_q : P 1 2 3 = Q := by
-  simp [P.intro, Q.intro]
-
-theorem p_heq_q : P 1 2 3 ≍ Q := by
-  simp [P.intro, Q.intro]
-
-/--
-info: Try this:
-  [apply] suffices «min_ast» : Q by grind [p_eq_q]
----
-error: unsolved goals
-⊢ P 1 2 3
--/
-#guard_msgs in
-example : P 1 2 3 := by
-  grind [p_eq_q] extract min_ast
-
-/--
-info: Try this:
-  [apply] suffices «min_ast» : Q by grind [p_heq_q]
----
-error: unsolved goals
-⊢ P 1 2 3
--/
-#guard_msgs in
-example : P 1 2 3 := by
-  grind [p_heq_q] extract min_ast
-
-end NoFVars
 
 variable (P : Nat → Nat → Nat → Prop) (Q : Prop) (h : P 1 2 3 = Q)
-
-/--
-info: Try this:
-  [apply] suffices «min_ast» : Q by grind
----
-error: unsolved goals
-P : Nat → Nat → Nat → Prop
-Q : Prop
-h : P 1 2 3 = Q
-⊢ P 1 2 3
--/
-#guard_msgs in
-example : P 1 2 3 := by
-  grind extract min_ast
 
 /--
 info: Try this:
@@ -216,27 +165,5 @@ example (p : Nat → Prop) (a b : Nat) (f : Nat → Nat) (h : f a = b) : p (f a)
 
 end SubtermsAndInternalization
 
-/--
-info: Try this:
-  [apply] suffices «min_ast» : f b = 0 by grind
----
-error: unsolved goals
-P : Nat → Nat → Nat → Prop
-Q : Prop
-h✝ : P 1 2 3 = Q
-f g : Nat → Nat
-a b : Nat
-h : g a = b
-⊢ f (g a) = 0
--/
-#guard_msgs in
-example (f g : Nat → Nat) (a b : Nat) (h : g a = b) : f (g a) = 0 := by
-  grind extract min_ast
-
--- BUG: Our extraction does not consider subterms properly.
 example (f g : Nat → Nat) (a b : Nat) (h : g a = b) : f (g a) = 0 := by
   grind extract f b = 0
-
--- BUG: Term has not been internalized.
-example (f : Nat → Nat) (a b : Nat) (h : a = b) : f (a + 0) = 0 := by
-  grind extract min_ast
