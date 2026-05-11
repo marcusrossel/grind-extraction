@@ -102,6 +102,31 @@ info: Try this:
 example (f : Nat → Nat) (g : Nat → Nat → Nat) (h : g a a = 0) (h' : a = b) : f (g a b) = 42 := by
   grind extract min_ast
 
+/--
+info: Try this:
+  [apply] suffices «ast_min» : 0 = 1 by grind
+-/
+#guard_msgs(info, drop error) in
+example (h : a + a = 0) : a + a = 1 := by
+  grind extract ast_min
+
+
+variable (f : Nat → Nat) (x y : Nat)
+variable (h₁ : x = y) (h₂ : x + x = 0) (h₃ : f 0 = 0)
+
+
+-- **TODO**
+-- This example involves a cycle as a result of `f (x + y) = f (x + x) = f 0 = 0`. Note how slow it
+-- already is. That is because we are traversing nodes in DFS instead of BFS order. So we only
+-- discover that the smallest term equivalent to `f 0` is `0` after having reached `f (f … (f 0))`
+-- any thereby running into the size limit.
+/--
+info: Try this:
+  [apply] suffices «min_ast» : 0 = 1 by grind
+-/
+#guard_msgs(info, drop error) in
+example (f : Nat → Nat) (h₁ : x = y) (h₂ : x + x = 0) (h₃ : f 0 = 0) : f (x + y) = 1 := by
+  grind extract min_ast
 
 
 
@@ -113,7 +138,16 @@ set_option trace.grind.extract.minAST true
 --          Although, when just running `grind` and checking the diagnostics, the terms `0` and
 --          `2 * a` are in the same equivalence class.
 example (f : Nat → Nat) (h : a + a = 0) (h' : a = b) : f (a + b) = 42 := by
-  grind -- extract min_ast
+  grind extract min_ast
+
+
+-- It seems that `grind` turns `a + a` into `2 * a` as part of preprocessing. As, for example, below
+-- if we `set_option trace.grind.extract.minAST true`, we can see that extraction runs on
+-- `2 * a = 1`, whereas in the theorem above, it runs on `f (a + b) = 42`. This causes problems
+-- during extraction, as we will try to extract from `a + b` which does not show to be in the same
+-- e-class as `2 * a`. Why not!?
+example (h : a + a = 0) : a + a = 0 := by
+  grind extract min_ast
 
 
 

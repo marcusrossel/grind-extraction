@@ -1,6 +1,6 @@
 import Extraction.Lean
 import Extraction.Sketch
-open Lean Meta Elab Term Tactic Grind
+open Std Lean Meta Elab Term Tactic Grind
 
 namespace Lean.Meta.Grind.Extraction
 
@@ -25,6 +25,7 @@ def _root_.Lean.Expr.toSized (e : Expr) : SizedExpr where
 
 structure ExtractM.State where
   limit : Nat
+  cache : HashMap ExprPtr SizedExpr
 
 abbrev ExtractM := StateT ExtractM.State GoalM
 
@@ -33,11 +34,32 @@ namespace ExtractM
 def limit : ExtractM Nat :=
   State.limit <$> get
 
+def cache : ExtractM (HashMap ExprPtr SizedExpr) :=
+  State.cache <$> get
+
 def belowLimit (e : SizedExpr) : ExtractM Bool := do
   return e.size ≤ (← limit)
 
 def setLimit (limit : Nat) : ExtractM Unit :=
   modify ({ · with limit })
+
+def setCache (node : ExprPtr) (e : SizedExpr) : ExtractM Unit := do
+  modify fun state => { state with cache := state.cache.insert node e }
+
+def withCache (node : Expr) (k : ExtractM (Option SizedExpr)) : ExtractM (Option SizedExpr) := do
+  let cache ← cache
+  let node : ExprPtr := { expr := node }
+  if let some e := cache[node]? then
+    if ← belowLimit e then
+      trace[grind.extract.minAST] "Cached: {e}"
+      return e
+    else
+      trace[grind.extract.minAST] "Cached exceeds limit: {e}"
+      return none
+  else
+    let some e ← k | return none
+    setCache node e
+    return e
 
 /-- Runs a given computation, resetting the `← limit` afterwards. -/
 def withResettingLimit (k : ExtractM α) : ExtractM α := do
@@ -54,7 +76,7 @@ def withLimit (limit : Nat) (k : ExtractM α) : ExtractM α := do
 
 /--
 Runs a given computation with the `← limit` reduced by a given amount `red`, and resets the
-`← limit` afterwards.
+`← limit` afterwards. If the `← limit` is smaller than `red`, returns `none` without running `k`.
 -/
 def withReducingLimitBy (red : Nat) (k : ExtractM (Option SizedExpr)) : ExtractM (Option SizedExpr) := do
   let limit ← limit
@@ -102,9 +124,10 @@ def traverseAppReducingLimit? (app : Expr) (f : Expr → ExtractM (Option SizedE
 
 end ExtractM
 
+-- **TODO** Remove the fuel.
 -- Note: Expects `target` to be internalized and hash-consed.
 partial def extractMinAST (target : Expr) : GoalM Expr := do
-  let state := { limit := target.sizeWithoutSharing }
+  let state := { limit := target.sizeWithoutSharing, cache := ∅ }
   let (e?, _) ← go target |>.run state
   let some e := e? | return target
   return e.expr
@@ -114,17 +137,18 @@ where
       trace[grind.extract.minAST] "Limit: {← limit}"
       let min? ← minInEqc target fun node => do
         withTraceNode `grind.extract.minAST (fun _ => return m!"E-Node {node}") do
-          if node.isFalse then return none
-          -- **TODO** How are children of other kinds of expressions to be handled? In particular, `.lam` and `.forallE`.
-          unless node.isApp do
-            let node := node.toSized
-            if ← belowLimit node then return node else return none
-          traverseAppReducingLimit? node fun e => do
-            -- **TODO** We only try to minimize arguments which are internalized.
-            unless ← alreadyInternalized e do
-              trace[grind.extract.minAST] "Non-Internalized Arg: {e}"
-              return e.toSized
-            go e
+          withCache node do
+            if node.isFalse then return none
+            -- **TODO** How are children of other kinds of expressions to be handled? In particular, `.lam` and `.forallE`.
+            unless node.isApp do
+              let node := node.toSized
+              if ← belowLimit node then return node else return none
+            traverseAppReducingLimit? node fun e => do
+              -- **TODO** We only try to minimize arguments which are internalized.
+              unless ← alreadyInternalized e do
+                trace[grind.extract.minAST] "Non-Internalized Arg: {e}"
+                return e.toSized
+              go e
       if let some min := min? then trace[grind.extract.minAST] "Minimal: {min}"
       return min?
 
