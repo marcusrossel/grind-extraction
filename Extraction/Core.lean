@@ -4,26 +4,14 @@ open Lean Meta Elab Term Tactic Grind
 
 namespace Lean.Meta.Grind.Extraction
 
--- TODO: The extraction mechanism so far is incorrect, as we are not considering equivalent
---       expressions for subterms. E.g. consider:
---
--- example (f g : Nat → Nat) (a b : Nat) (h : g a = b) : f (g a) = 0 := by
---   grind extract min_ast
-
 structure SizedExpr where
   expr : Expr
   size : Nat
 
 namespace SizedExpr
 
-instance : Min SizedExpr where
-  min e₁ e₂ := if e₁.size ≤ e₂.size then e₁ else e₂
-
-def min? (e₁ : SizedExpr) (e₂? : Option SizedExpr) (threshold : Nat) : Option SizedExpr := Id.run do
-  let mut m := e₁
-  if let some e₂ := e₂? then m := min m e₂
-  unless m.size ≤ threshold do return none
-  return m
+instance : ToMessageData SizedExpr where
+  toMessageData e := m!"[{e.size}] {e.expr}"
 
 def app (fn arg : SizedExpr) : SizedExpr where
   expr := .app fn.expr arg.expr
@@ -35,34 +23,110 @@ def _root_.Lean.Expr.toSized (e : Expr) : SizedExpr where
   expr := e
   size := e.sizeWithoutSharing
 
+structure ExtractM.State where
+  limit : Nat
+
+abbrev ExtractM := StateT ExtractM.State GoalM
+
+namespace ExtractM
+
+def limit : ExtractM Nat :=
+  State.limit <$> get
+
+def belowLimit (e : SizedExpr) : ExtractM Bool := do
+  return e.size ≤ (← limit)
+
+def setLimit (limit : Nat) : ExtractM Unit :=
+  modify ({ · with limit })
+
+/-- Runs a given computation, resetting the `← limit` afterwards. -/
+def withResettingLimit (k : ExtractM α) : ExtractM α := do
+  let limit ← limit
+  let result ← k
+  modify ({ · with limit })
+  return result
+
+/-- Runs a given computation with a given `limit`, resetting the `← limit` afterwards. -/
+def withLimit (limit : Nat) (k : ExtractM α) : ExtractM α := do
+  withResettingLimit do
+    setLimit limit
+    k
+
+/--
+Runs a given computation with the `← limit` reduced by a given amount `red`, and resets the
+`← limit` afterwards.
+-/
+def withReducingLimitBy (red : Nat) (k : ExtractM (Option SizedExpr)) : ExtractM (Option SizedExpr) := do
+  let limit ← limit
+  unless red ≤ limit do return none
+  withLimit (limit - red) k
+
+/-- Lifts `Grind.foldEqc` to `ExtractM` by propagating the `ExtractM.State` in the obvious way. -/
+nonrec def foldEqc (e : Expr) (init : α) (f : ENode → α → ExtractM α) : ExtractM α := do
+  let initState ← get
+  let (result, finalState) ← foldEqc e (init, initState) fun node (a, state) => do
+    let m := f node a
+    m.run state
+  set finalState
+  return result
+
+/--
+Returns the smallest expression represented by any of the e-nodes in the e-class of `e`. The
+extraction from an e-node is performed by `nodeMin?` where the input `Expr` is the e-node. We assume
+that the expression returned by `nodeMin?` respects the `← limit` with which it was called. If no
+expression with a size within the `← limit` can be found, `nodeMin?` should return `none`.
+-/
+def minInEqc (e : Expr) (nodeMin? : Expr → ExtractM (Option SizedExpr)) :
+    ExtractM (Option SizedExpr) := do
+  withResettingLimit do
+    foldEqc e none fun node min? => do
+      let some newMin ← nodeMin? node.self | return min?
+      setLimit newMin.size
+      return newMin
+
+/--
+Returns the result of a applying a function `f` to each part of an application. So, given `app` is
+`fn arg₁ … argₙ`, returns `(f fn) (f arg₁) … (f argₙ)`. If any call to `f` returns `none`, the
+function aborts and returns `none`. While traversing each component of the application, the
+`← limit` is reduced by the size of the components processed so far. For example, when calling `f`
+on `arg₃`, the `← limit` is set to `(← limit) - (f fn).size - (f arg₁).size - (f arg₂).size`.
+-/
+def traverseAppReducingLimit? (app : Expr) (f : Expr → ExtractM (Option SizedExpr)) :
+    ExtractM (Option SizedExpr) := do
+  let some fn ← f app.getAppFn | return none
+  let mut e := fn
+  for arg in app.getAppArgs do
+    let some a ← withReducingLimitBy e.size do f arg | return none
+    e := e.app a
+  return e
+
+end ExtractM
+
 -- Note: Expects `target` to be internalized and hash-consed.
 partial def extractMinAST (target : Expr) : GoalM Expr := do
-  let target := target.toSized
-  let some { expr, .. } ← go target target.size | return target.expr
-  return expr
+  let state := { limit := target.sizeWithoutSharing }
+  let (e?, _) ← go target |>.run state
+  let some e := e? | return target
+  return e.expr
 where
-  go (target : SizedExpr) (threshold : Nat) : GoalM (Option SizedExpr) := do
-    foldEqc target.expr none fun node best? => do
-      let expr := node.self
-      if expr.isFalse then return best?
-      -- **TODO** How are children of other kinds of expressions to be handled? In particular, `.lam` and `.forallE`.
-      unless expr.isApp do return expr.toSized.min? best? threshold
-      let mut e := expr.getAppFn.toSized
-      let mut threshold := threshold
-      if let some best := best? then threshold := min threshold best.size
-      threshold := threshold - e.size
-      for arg in expr.getAppArgs do
-        let arg := arg.toSized
-        unless 0 < threshold do return best?
-        -- **TODO** We only try to minimize arguments which are internalized.
-        if ← alreadyInternalized arg.expr then
-          let some minArg ← go arg threshold | return best?
-          e := e.app minArg
-          threshold := threshold - minArg.size
-        else
-          e := e.app arg
-          threshold := threshold - arg.size
-      return e
+  go (target : Expr) : ExtractM (Option SizedExpr) := open ExtractM in do
+    withTraceNode `grind.extract.minAST (fun _ => return m!"Extracting from {target}") do
+      trace[grind.extract.minAST] "Limit: {← limit}"
+      let min? ← minInEqc target fun node => do
+        withTraceNode `grind.extract.minAST (fun _ => return m!"E-Node {node}") do
+          if node.isFalse then return none
+          -- **TODO** How are children of other kinds of expressions to be handled? In particular, `.lam` and `.forallE`.
+          unless node.isApp do
+            let node := node.toSized
+            if ← belowLimit node then return node else return none
+          traverseAppReducingLimit? node fun e => do
+            -- **TODO** We only try to minimize arguments which are internalized.
+            unless ← alreadyInternalized e do
+              trace[grind.extract.minAST] "Non-Internalized Arg: {e}"
+              return e.toSized
+            go e
+      if let some min := min? then trace[grind.extract.minAST] "Minimal: {min}"
+      return min?
 
 -- Note: Expects `target` to be internalized and hash-consed and `expr` to be hash-consed.
 partial def extractExpr? (target expr : Expr) : GoalM (Option Expr) := do

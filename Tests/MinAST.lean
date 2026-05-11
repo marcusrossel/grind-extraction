@@ -1,4 +1,5 @@
 import Extraction.Grind
+import Extraction.Trace
 
 section NoFVars
 
@@ -85,10 +86,41 @@ info: Try this:
 example (f : Nat → Nat) (h : a = b) : f (a + 0) = 0 := by
   grind extract min_ast
 
+/--
+info: Try this:
+  [apply] suffices «min_ast» : f 0 = 0 by grind
+-/
+#guard_msgs(info, drop error) in
+example (f : Nat → Nat) (h : a + a = 0) : f (a + a) = 0 := by
+  grind extract min_ast
+
+/--
+info: Try this:
+  [apply] suffices «min_ast» : f 0 = 42 by grind
+-/
+#guard_msgs(info, drop error) in
+example (f : Nat → Nat) (g : Nat → Nat → Nat) (h : g a a = 0) (h' : a = b) : f (g a b) = 42 := by
+  grind extract min_ast
+
+
+
+
+
+
+set_option trace.grind.extract.minAST true
+
+-- **TODO** We would have expected the e-class of `a + b` to contain `0` as well, but it doesn't.
+--          Although, when just running `grind` and checking the diagnostics, the terms `0` and
+--          `2 * a` are in the same equivalence class.
+example (f : Nat → Nat) (h : a + a = 0) (h' : a = b) : f (a + b) = 42 := by
+  grind -- extract min_ast
+
+
+
+
+variable (f : Nat → Nat) (a b : Nat)
+
 -- **TODO** This should at least find the smaller term `f (a + a + a) = 0`.
 example (f : Nat → Nat) (h₁ : a = b) (h₂ : b = c) (h₃ : c = d) (h₄ : d = e)
     (h₅ : f a = 0) : f (a + (f b) + c + (f d) + e) = 0 := by
-  grind extract min_ast
-
--- **TODO!** Add tracing to min_ast extraction, so we can see which terms were weighted how heavily,
---           and which were skipped entirely.
+  grind -- extract min_ast
