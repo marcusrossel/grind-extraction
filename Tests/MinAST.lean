@@ -115,11 +115,10 @@ variable (f : Nat → Nat) (x y : Nat)
 variable (h₁ : x = y) (h₂ : x + x = 0) (h₃ : f 0 = 0)
 
 
--- **TODO**
--- This example involves a cycle as a result of `f (x + y) = f (x + x) = f 0 = 0`. Note how slow it
--- already is. That is because we are traversing nodes in DFS instead of BFS order. So we only
--- discover that the smallest term equivalent to `f 0` is `0` after having reached `f (f … (f 0))`
--- any thereby running into the size limit.
+-- **NOTE** This is an expample where DFS-based extraction took a while. This is because the example
+-- involves a cycle as a result of `f (x + y) = f (x + x) = f 0 = 0`. When traversing in DFS order,
+-- we only discover that the smallest term equivalent to `f 0` is `0` after having reached
+-- `f (f … (f 0))` and thereby running into the size limit.
 /--
 info: Try this:
   [apply] suffices «min_ast» : 0 = 1 by grind

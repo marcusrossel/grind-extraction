@@ -1,156 +1,171 @@
 import Extraction.Lean
 import Extraction.Sketch
+import Batteries
 open Std Lean Meta Elab Term Tactic Grind
+open Batteries (BinaryHeap)
 
 namespace Lean.Meta.Grind.Extraction
 
 structure SizedExpr where
   expr : Expr
   size : Nat
+  deriving Inhabited
 
-namespace SizedExpr
-
-instance : ToMessageData SizedExpr where
+instance SizedExpr.instToMessageData : ToMessageData SizedExpr where
   toMessageData e := m!"[{e.size}] {e.expr}"
-
-def app (fn arg : SizedExpr) : SizedExpr where
-  expr := .app fn.expr arg.expr
-  size := 1 + fn.size + arg.size
-
-end SizedExpr
 
 def _root_.Lean.Expr.toSized (e : Expr) : SizedExpr where
   expr := e
   size := e.sizeWithoutSharing
 
+abbrev ExtractM.Queue := BinaryHeap SizedExpr (·.size > ·.size)
+
 structure ExtractM.State where
-  limit : Nat
-  cache : HashMap ExprPtr SizedExpr
+  /-- Records the (current) minimal representatives for e-classes. Note that we expect the given
+      `ExprPtr` to be the `root` of the e-class. -/
+  mins : HashMap ExprPtr SizedExpr
+  /-- Given an e-node `ExprPtr`, indicates how many unresolved child e-classes it has. For example,
+      for `f a b c`, if `mins` contains a value for `f` and `b`, but not `a` and `c`, then
+      `pending[f a b c]? = 2`. Note that we only count *distinct* e-classes, so multiple
+      references to values of the same e-class are counted only once. For example, in the example
+      above, if `a` and `c` are in the same e-class, then `pending[f a b c]? = 1`. -/
+  pending : HashMap ExprPtr Nat
+  /-- Maps e-classes to the set of e-nodes which reference them. For example, if there are e-nodes
+      `f a` and `g a`, then `parents[a]? = #[f a, g a]`. Note that we expect the given `ExprPtr` to
+      be the `root` of the e-class. -/
+  parents : HashMap ExprPtr (Array ExprPtr)
+  queue : Queue
+
+instance ExtractM.State.instEmptyCollection : EmptyCollection State where
+  emptyCollection := { mins := ∅, parents := ∅, pending := ∅, queue := ∅ }
 
 abbrev ExtractM := StateT ExtractM.State GoalM
 
 namespace ExtractM
 
-def limit : ExtractM Nat :=
-  State.limit <$> get
+def setPending (node : Expr) (num : Nat) : ExtractM Unit := do
+  modify fun s => { s with pending := s.pending.insert ⟨node⟩ num }
 
-def cache : ExtractM (HashMap ExprPtr SizedExpr) :=
-  State.cache <$> get
-
-def belowLimit (e : SizedExpr) : ExtractM Bool := do
-  return e.size ≤ (← limit)
-
-def setLimit (limit : Nat) : ExtractM Unit :=
-  modify ({ · with limit })
-
-def setCache (node : ExprPtr) (e : SizedExpr) : ExtractM Unit := do
-  modify fun state => { state with cache := state.cache.insert node e }
-
-def withCache (node : Expr) (k : ExtractM (Option SizedExpr)) : ExtractM (Option SizedExpr) := do
-  let cache ← cache
-  let node : ExprPtr := { expr := node }
-  if let some e := cache[node]? then
-    if ← belowLimit e then
-      trace[grind.extract.minAST] "Cached: {e}"
-      return e
-    else
-      trace[grind.extract.minAST] "Cached exceeds limit: {e}"
-      return none
-  else
-    let some e ← k | return none
-    setCache node e
-    return e
-
-/-- Runs a given computation, resetting the `← limit` afterwards. -/
-def withResettingLimit (k : ExtractM α) : ExtractM α := do
-  let limit ← limit
-  let result ← k
-  modify ({ · with limit })
-  return result
-
-/-- Runs a given computation with a given `limit`, resetting the `← limit` afterwards. -/
-def withLimit (limit : Nat) (k : ExtractM α) : ExtractM α := do
-  withResettingLimit do
-    setLimit limit
-    k
+/-- Implementation detail of `resolvePending`. -/
+def nodeSize! (node : ExprPtr) : ExtractM Nat := do
+  let { mins, .. } ← get
+  node.expr.withApp fun fn args => do
+    let mut size := 0
+    for e in #[fn] ++ args do
+      -- This skips non-internalized expressions.
+      let some child ← getENode? e | continue
+      let eqc : ExprPtr := ⟨child.root⟩
+      size := size + mins[eqc]!.size
+    return size
 
 /--
-Runs a given computation with the `← limit` reduced by a given amount `red`, and resets the
-`← limit` afterwards. If the `← limit` is smaller than `red`, returns `none` without running `k`.
+Propagates the changes to `State.pending` and `State.queue` which should follow from the given
+e-class `eqc` having a (newly set) minimum:
+(1) Each parent e-node of `eqc` has its `pending` count reduced by `1`.
+(2) If Step 1 reduces any `pending` count to `0`, the corresponding e-node is enqueued.
 -/
-def withReducingLimitBy (red : Nat) (k : ExtractM (Option SizedExpr)) : ExtractM (Option SizedExpr) := do
-  let limit ← limit
-  unless red ≤ limit do return none
-  withLimit (limit - red) k
+def resolvePending (eqc : Expr) : ExtractM Unit := do
+  let eqc : ExprPtr := ⟨eqc⟩
+  let s ← get
+  let some eqcParents := s.parents[eqc]? | return
+  let mut pending := s.pending
+  let mut queue := s.queue
+  for parent in eqcParents do
+    let some (num + 1) := pending[parent]? | continue
+    pending := pending.insert parent num
+    if num = 0 then
+      -- This is not the size of `parent.expr`, but rather the size which its minimal representation
+      --  *will* have when/if constructed.
+      let size ← nodeSize! parent
+      queue := queue.insert { parent with size }
+  modify ({ · with pending, queue })
 
-/-- Lifts `Grind.foldEqc` to `ExtractM` by propagating the `ExtractM.State` in the obvious way. -/
-nonrec def foldEqc (e : Expr) (init : α) (f : ENode → α → ExtractM α) : ExtractM α := do
-  let initState ← get
-  let (result, finalState) ← foldEqc e (init, initState) fun node (a, state) => do
-    let m := f node a
-    m.run state
-  set finalState
-  return result
+def addParent (eqc node : Expr) : ExtractM Unit := do
+  modify fun s =>
+    let parents := s.parents.alter ⟨eqc⟩ fun
+      | none    => #[(⟨node⟩ : ExprPtr)]
+      | some ps => ps.push ⟨node⟩
+    { s with parents }
 
-/--
-Returns the smallest expression represented by any of the e-nodes in the e-class of `e`. The
-extraction from an e-node is performed by `nodeMin?` where the input `Expr` is the e-node. We assume
-that the expression returned by `nodeMin?` respects the `← limit` with which it was called. If no
-expression with a size within the `← limit` can be found, `nodeMin?` should return `none`.
--/
-def minInEqc (e : Expr) (nodeMin? : Expr → ExtractM (Option SizedExpr)) :
-    ExtractM (Option SizedExpr) := do
-  withResettingLimit do
-    foldEqc e none fun node min? => do
-      let some newMin ← nodeMin? node.self | return min?
-      setLimit newMin.size
-      return newMin
+def enqueue (node : SizedExpr) : ExtractM Unit := do
+  modify fun s => { s with queue := s.queue.insert node }
 
-/--
-Returns the result of a applying a function `f` to each part of an application. So, given `app` is
-`fn arg₁ … argₙ`, returns `(f fn) (f arg₁) … (f argₙ)`. If any call to `f` returns `none`, the
-function aborts and returns `none`. While traversing each component of the application, the
-`← limit` is reduced by the size of the components processed so far. For example, when calling `f`
-on `arg₃`, the `← limit` is set to `(← limit) - (f fn).size - (f arg₁).size - (f arg₂).size`.
--/
-def traverseAppReducingLimit? (app : Expr) (f : Expr → ExtractM (Option SizedExpr)) :
-    ExtractM (Option SizedExpr) := do
-  let some fn ← f app.getAppFn | return none
-  let mut e := fn
-  for arg in app.getAppArgs do
-    let some a ← withReducingLimitBy e.size do f arg | return none
-    e := e.app a
-  return e
+def dequeue? : ExtractM (Option SizedExpr) := do
+  let { queue, .. } ← get
+  let (next?, queue) := queue.extractMax
+  modify ({ · with queue })
+  return next?
+
+def hasMin (eqc : Expr) : ExtractM Bool := do
+  let { mins, .. } ← get
+  return mins.contains ⟨eqc⟩
+
+def getMin! (eqc : ExprPtr) : ExtractM Expr := do
+  let { mins, .. } ← get
+  return mins[eqc]!.expr
+
+def setMin (eqc : Expr) (min : SizedExpr) : ExtractM Unit := do
+  modify fun s => { s with mins := s.mins.insert ⟨eqc⟩ min }
+
+/-- Returns the number of unique child e-classes. -/
+def traverseAppChildEqcs (e : Expr) (k : Expr → ExtractM Unit) : ExtractM Nat := do
+  let mut current := e
+  let mut visited : HashSet ExprPtr := ∅
+  repeat
+    let (fn?, arg) := getFnArg? current
+    -- We skip non-internalized expressions, as they (by definition) do not have e-nodes.
+    if let some eqc ← getRoot? arg then
+      if ⟨eqc⟩ ∉ visited then
+        k eqc
+        visited := visited.insert ⟨eqc⟩
+    let some fn := fn? | break
+    current := fn
+  return visited.size
+where
+  getFnArg? (current : Expr) : (Option Expr) × Expr := Id.run do
+    let .app fn arg := current | return (none, current)
+    return (fn, arg)
+
+nonrec def run (k : ExtractM α) : GoalM α := do
+  Prod.fst <$> k.run ∅
 
 end ExtractM
 
--- **TODO** Remove the fuel.
 -- Note: Expects `target` to be internalized and hash-consed.
+open ExtractM
 partial def extractMinAST (target : Expr) : GoalM Expr := do
-  let state := { limit := target.sizeWithoutSharing, cache := ∅ }
-  let (e?, _) ← go target |>.run state
-  let some e := e? | return target
-  return e.expr
+  run (init *> assign ⟨target⟩ *> construct target)
 where
-  go (target : Expr) : ExtractM (Option SizedExpr) := open ExtractM in do
-    withTraceNode `grind.extract.minAST (fun _ => return m!"Extracting from {target}") do
-      trace[grind.extract.minAST] "Limit: {← limit}"
-      let min? ← minInEqc target fun node => do
-        withTraceNode `grind.extract.minAST (fun _ => return m!"E-Node {node}") do
-          withCache node do
-            if node.isFalse then return none
-            -- **TODO** How are children of other kinds of expressions to be handled? In particular, `.lam` and `.forallE`.
-            unless node.isApp do
-              let node := node.toSized
-              if ← belowLimit node then return node else return none
-            traverseAppReducingLimit? node fun e => do
-              -- **TODO** We only try to minimize arguments which are internalized.
-              unless ← alreadyInternalized e do
-                trace[grind.extract.minAST] "Non-Internalized Arg: {e}"
-                return e.toSized
-              go e
-      if let some min := min? then trace[grind.extract.minAST] "Minimal: {min}"
-      return min?
+  init : ExtractM Unit := do
+    for e in ← getExprs do
+      if e.isApp then
+        let numChildEqcs ← traverseAppChildEqcs e (addParent · e)
+        -- If `numChildEqs = 0`, that means that all parts of the application `e` are non-
+        -- internalized. In that case, we have to consider `e` to be a leaf node.
+        if numChildEqcs = 0 then
+          enqueue e.toSized
+        else
+          setPending e numChildEqcs
+      else if e.isFalse then
+        continue
+      else
+        enqueue e.toSized
+  assign (target : ExprPtr) : ExtractM Unit := do
+    repeat
+      let some next ← dequeue? | return
+      let eqc ← getRoot next.expr
+      if ← hasMin eqc then continue
+      setMin eqc next
+      if ⟨eqc⟩ == target then return
+      resolvePending eqc
+  construct (eqcMem : Expr) : ExtractM Expr := do
+    -- If the expression is not internalized, we return it as is.
+    let some eqc ← getRoot? eqcMem | return eqcMem
+    let node ← getMin! ⟨eqc⟩
+    if node.isApp then
+      node.traverseApp construct
+    else
+      return node
 
 -- Note: Expects `target` to be internalized and hash-consed and `expr` to be hash-consed.
 partial def extractExpr? (target expr : Expr) : GoalM (Option Expr) := do
