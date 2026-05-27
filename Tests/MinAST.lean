@@ -110,12 +110,7 @@ info: Try this:
 example (h : a + a = 0) : a + a = 1 := by
   grind extract ast_min
 
-
-variable (f : Nat → Nat) (x y : Nat)
-variable (h₁ : x = y) (h₂ : x + x = 0) (h₃ : f 0 = 0)
-
-
--- **NOTE** This is an expample where DFS-based extraction took a while. This is because the example
+-- **NOTE** This is an example where DFS-based extraction took a while. This is because the example
 -- involves a cycle as a result of `f (x + y) = f (x + x) = f 0 = 0`. When traversing in DFS order,
 -- we only discover that the smallest term equivalent to `f 0` is `0` after having reached
 -- `f (f … (f 0))` and thereby running into the size limit.
@@ -127,9 +122,8 @@ info: Try this:
 example (f : Nat → Nat) (h₁ : x = y) (h₂ : x + x = 0) (h₃ : f 0 = 0) : f (x + y) = 1 := by
   grind extract min_ast
 
-
-
-
+variable (f : Nat → Nat) (x y : Nat)
+variable (h₁ : x = y) (h₂ : x + x = 0) (h₃ : f 0 = 0)
 
 set_option trace.grind.extract.minAST true
 
@@ -138,7 +132,6 @@ set_option trace.grind.extract.minAST true
 --          `2 * a` are in the same equivalence class.
 example (f : Nat → Nat) (h : a + a = 0) (h' : a = b) : f (a + b) = 42 := by
   grind extract min_ast
-
 
 -- It seems that `grind` turns `a + a` into `2 * a` as part of preprocessing. As, for example, below
 -- if we `set_option trace.grind.extract.minAST true`, we can see that extraction runs on

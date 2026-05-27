@@ -14,6 +14,9 @@ structure SizedExpr where
 instance SizedExpr.instToMessageData : ToMessageData SizedExpr where
   toMessageData e := m!"[{e.size}] {e.expr}"
 
+instance : Coe SizedExpr MessageData where
+  coe := toMessageData
+
 def _root_.Lean.Expr.toSized (e : Expr) : SizedExpr where
   expr := e
   size := e.sizeWithoutSharing
@@ -21,8 +24,9 @@ def _root_.Lean.Expr.toSized (e : Expr) : SizedExpr where
 abbrev ExtractM.Queue := BinaryHeap SizedExpr (·.size > ·.size)
 
 structure ExtractM.State where
-  /-- Records the (current) minimal representatives for e-classes. Note that we expect the given
-      `ExprPtr` to be the `root` of the e-class. -/
+  /-- Records the minimal e-node for each e-class. Note that we expect the given `ExprPtr` to be the
+      `root` of the e-class. The size associated with each e-node is the the size which its minimal
+      representation *will* have when/if constructed. -/
   mins : HashMap ExprPtr SizedExpr
   /-- Given an e-node `ExprPtr`, indicates how many unresolved child e-classes it has. For example,
       for `f a b c`, if `mins` contains a value for `f` and `b`, but not `a` and `c`, then
@@ -34,14 +38,78 @@ structure ExtractM.State where
       `f a` and `g a`, then `parents[a]? = #[f a, g a]`. Note that we expect the given `ExprPtr` to
       be the `root` of the e-class. -/
   parents : HashMap ExprPtr (Array ExprPtr)
+  /-- The priority queue used to decide in which order to visit e-nodes during the main loop of
+      bottom-up extraction. -/
   queue : Queue
+  /-- Maps e-classes to their minimal representative *expression*. This is used to make construction
+      of the minimal expression more efficient in `extractMinAST.construct`. -/
+  cache : HashMap ExprPtr Expr
 
 instance ExtractM.State.instEmptyCollection : EmptyCollection State where
-  emptyCollection := { mins := ∅, parents := ∅, pending := ∅, queue := ∅ }
+  emptyCollection := { mins := ∅, parents := ∅, pending := ∅, queue := ∅, cache := ∅ }
 
 abbrev ExtractM := StateT ExtractM.State GoalM
 
 namespace ExtractM
+
+def traceExtract (msg : Thunk MessageData) : ExtractM Unit := do
+  trace[grind.extract.minAST] msg.get
+
+def withTraceExtractNode (msg : Thunk MessageData) (k : ExtractM α) : ExtractM α :=
+  withTraceNode `grind.extract.minAST (fun _ => return msg.get) k
+
+def traceMins : ExtractM Unit := do
+  withTraceExtractNode "Assigned" do
+    let { mins, .. } ← get
+    if mins.isEmpty then
+      traceExtract "∅"
+    else
+      let mut trivials := #[]
+      let mut assignments := #[]
+      for (eqc, min) in mins do
+        let eqc ← getEqc eqc.expr
+        if eqc.length = 1 then
+          trivials := trivials.push min
+        else
+          assignments := assignments.push (eqc, min)
+      for (eqc, min) in assignments do
+        traceExtract m!"{eqc} ↦ {min}"
+      unless trivials.isEmpty do
+        withTraceExtractNode "Trivial" do
+          for node in trivials do
+            traceExtract node
+
+def tracePending : ExtractM Unit := do
+  withTraceExtractNode "Pending" do
+    let { pending, .. } ← get
+    if pending.isEmpty then
+      traceExtract "∅"
+    else
+      for (node, num) in pending do
+        traceExtract m!"{node.expr} ↦ {num}"
+
+def traceParents : ExtractM Unit := do
+  withTraceExtractNode "Parents" do
+    let { parents, .. } ← get
+    if parents.isEmpty then
+      traceExtract "∅"
+    else
+      for (eqc, parents) in parents do
+        let eqc ← getEqc eqc.expr
+        withTraceExtractNode m!"Of {eqc}" do
+          for parent in parents do
+            traceExtract parent.expr
+
+def traceQueue : ExtractM Unit := do
+  withTraceExtractNode "Queue" do
+    let { queue, .. } ← get
+    let queue := queue.arr
+    if queue.isEmpty then
+      traceExtract "∅"
+    else
+      let queue := queue -- **TODO** sort the queue.
+      for node in queue do
+        traceExtract node
 
 def setPending (node : Expr) (num : Nat) : ExtractM Unit := do
   modify fun s => { s with pending := s.pending.insert ⟨node⟩ num }
@@ -64,21 +132,24 @@ e-class `eqc` having a (newly set) minimum:
 (1) Each parent e-node of `eqc` has its `pending` count reduced by `1`.
 (2) If Step 1 reduces any `pending` count to `0`, the corresponding e-node is enqueued.
 -/
-def resolvePending (eqc : Expr) : ExtractM Unit := do
+def updateParents (eqc : Expr) : ExtractM Unit := do
   let eqc : ExprPtr := ⟨eqc⟩
   let s ← get
   let some eqcParents := s.parents[eqc]? | return
-  let mut pending := s.pending
-  let mut queue := s.queue
-  for parent in eqcParents do
-    let some (num + 1) := pending[parent]? | continue
-    pending := pending.insert parent num
-    if num = 0 then
-      -- This is not the size of `parent.expr`, but rather the size which its minimal representation
-      --  *will* have when/if constructed.
-      let size ← nodeSize! parent
-      queue := queue.insert { parent with size }
-  modify ({ · with pending, queue })
+  withTraceExtractNode "Updating Parent E-Nodes" do
+    let mut pending := s.pending
+    let mut queue := s.queue
+    for parent in eqcParents do
+      let some (num + 1) := pending[parent]? | continue
+      pending := pending.insert parent num
+      traceExtract m!"{parent.expr} ↦ {num} pending"
+      if num = 0 then
+        -- This is not the size of `parent.expr`, but rather the size which its minimal
+        -- representation *will* have when/if constructed.
+        let size ← nodeSize! parent
+        traceExtract m!"Enqueuing {parent.expr}"
+        queue := queue.insert { parent with size }
+    modify ({ · with pending, queue })
 
 def addParent (eqc node : Expr) : ExtractM Unit := do
   modify fun s =>
@@ -107,8 +178,8 @@ def getMin! (eqc : ExprPtr) : ExtractM Expr := do
 def setMin (eqc : Expr) (min : SizedExpr) : ExtractM Unit := do
   modify fun s => { s with mins := s.mins.insert ⟨eqc⟩ min }
 
-/-- Returns the number of unique child e-classes. -/
-def traverseAppChildEqcs (e : Expr) (k : Expr → ExtractM Unit) : ExtractM Nat := do
+/-- Returns the unique child e-classes. -/
+def traverseAppChildEqcs (e : Expr) (k : Expr → ExtractM Unit) : ExtractM (HashSet ExprPtr) := do
   let mut current := e
   let mut visited : HashSet ExprPtr := ∅
   repeat
@@ -120,11 +191,20 @@ def traverseAppChildEqcs (e : Expr) (k : Expr → ExtractM Unit) : ExtractM Nat 
         visited := visited.insert ⟨eqc⟩
     let some fn := fn? | break
     current := fn
-  return visited.size
+  return visited
 where
   getFnArg? (current : Expr) : (Option Expr) × Expr := Id.run do
     let .app fn arg := current | return (none, current)
     return (fn, arg)
+
+def withCache (eqc : ExprPtr) (k : ExtractM Expr) : ExtractM Expr := do
+  let { cache, .. } ← get
+  if let some e := cache[eqc]? then
+    return e
+  else
+    let e ← k
+    modify ({ · with cache := cache.insert eqc e })
+    return e
 
 nonrec def run (k : ExtractM α) : GoalM α := do
   Prod.fst <$> k.run ∅
@@ -134,38 +214,59 @@ end ExtractM
 -- Note: Expects `target` to be internalized and hash-consed.
 open ExtractM
 partial def extractMinAST (target : Expr) : GoalM Expr := do
-  run (init *> assign ⟨target⟩ *> construct target)
+  run do
+    withTraceExtractNode "Initializing" do init
+    withTraceExtractNode "Assigning"    do assign ⟨target⟩
+    withTraceExtractNode "Constructing" do construct target
 where
   init : ExtractM Unit := do
     for e in ← getExprs do
-      if e.isApp then
-        let numChildEqcs ← traverseAppChildEqcs e (addParent · e)
-        -- If `numChildEqs = 0`, that means that all parts of the application `e` are non-
-        -- internalized. In that case, we have to consider `e` to be a leaf node.
-        if numChildEqcs = 0 then
+      withTraceExtractNode e do
+        if e.isApp then
+          let childEqcs ← traverseAppChildEqcs e (addParent · e)
+          -- If `numChildEqs = 0`, that means that all parts of the application `e` are non-
+          -- internalized. In that case, we have to consider `e` to be a leaf node.
+          if childEqcs.isEmpty then
+            traceExtract "Enqueuing application leaf"
+            enqueue e.toSized
+          else
+            traceExtract m!"Pending: {childEqcs.toList.map (·.expr)}"
+            setPending e childEqcs.size
+        else if !e.isFalse then
+          traceExtract "Enqueuing basic leaf"
           enqueue e.toSized
-        else
-          setPending e numChildEqcs
-      else if e.isFalse then
-        continue
-      else
-        enqueue e.toSized
+        traceQueue
+        tracePending
+        traceParents
   assign (target : ExprPtr) : ExtractM Unit := do
     repeat
       let some next ← dequeue? | return
-      let eqc ← getRoot next.expr
-      if ← hasMin eqc then continue
-      setMin eqc next
-      if ⟨eqc⟩ == target then return
-      resolvePending eqc
+      withTraceExtractNode next do
+        traceQueue
+        traceMins
+        let eqc ← getRoot next.expr
+        if ← hasMin eqc then
+          traceExtract m!"E-Class of {inlineExpr next.expr}is already assigned"
+        else
+          traceExtract m!"Setting{inlineExpr next.expr}as minimum of its e-class"
+          setMin eqc next
+          if ⟨eqc⟩ == target then
+            traceExtract m!"E-class of target{inlineExpr target.expr}is assigned"
+            return
+          else
+            updateParents eqc
   construct (eqcMem : Expr) : ExtractM Expr := do
     -- If the expression is not internalized, we return it as is.
     let some eqc ← getRoot? eqcMem | return eqcMem
-    let node ← getMin! ⟨eqc⟩
-    if node.isApp then
-      node.traverseApp construct
-    else
-      return node
+    withCache ⟨eqc⟩ do
+      let node ← getMin! ⟨eqc⟩
+      if node.isApp then
+        let e ← node.traverseApp construct
+        traceExtract e
+        return e
+      else
+        traceExtract node
+        return node
 
 -- Note: Expects `target` to be internalized and hash-consed and `expr` to be hash-consed.
 partial def extractExpr? (target expr : Expr) : GoalM (Option Expr) := do
