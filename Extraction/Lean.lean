@@ -1,9 +1,21 @@
 import Lean
 
+def Array.pop? (as : Array α) : Option (α × Array α) :=
+  if _ : 0 < as.size then
+    some (as.back, as.pop)
+  else
+    none
+
 def HEq.mp {α β : Sort u} (h : α ≍ β) (a : α) : β :=
   eq_of_heq h ▸ a
 
-namespace Lean.Meta
+namespace Lean
+
+def Expr.getFnArg? (e : Expr) : (Option Expr) × Expr := Id.run do
+  let .app fn arg := e | return (none, e)
+  return (fn, arg)
+
+namespace Meta
 
 def mkHEqMP (heqProof pr : Expr) : MetaM Expr :=
   mkAppM ``HEq.mp #[heqProof, pr]
