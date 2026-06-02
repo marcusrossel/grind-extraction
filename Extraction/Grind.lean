@@ -135,8 +135,15 @@ protected def «grind»
         let header := "Try this (`grind` succeeded, extraction is redundant):"
         TryThis.addSuggestion head suggestion (origSpan? := ← getRef) (header := header)
       | .extraction ex =>
-        let suggestion ← grindSufficesSuggestion ex sketch pre
-        TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
+        let ex := ex.toSized
+        let target := (← mvarId'.getType).toSized
+        -- **TODO** This only makes sense when the only kind of extraction we allow is `min_ast`.
+        if ex.size < target.size then
+          let suggestion ← grindSufficesSuggestion ex.expr sketch pre
+          TryThis.addSuggestion head suggestion (origSpan? := ← getRef)
+        else
+          throwError "Expression found by `grind extract min_ast` is not smaller.\
+                      {indentD ex}\nvs{indentD target}"
 
 -- Corresponds to `Lean.Elab.Tactic.evalGrindCore`.
 protected def evalGrindCore

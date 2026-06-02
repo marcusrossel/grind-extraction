@@ -78,6 +78,7 @@ info: Try this:
 example (f g : Nat → Nat) (h : g a = b) : f (g a) = 0 := by
   grind extract min_ast
 
+
 /--
 info: Try this:
   [apply] suffices «min_ast» : f b = 0 by grind
@@ -94,6 +95,19 @@ info: Try this:
 example (f : Nat → Nat) (h : a + a = 0) : f (a + a) = 0 := by
   grind extract min_ast
 
+-- **NOTE** This is an example where it's important that we define special costs for special
+--          constants - namely `OfNat.ofNat` here. If we did not give such applications a fixed cost
+--          of `1`, then we would get:
+--
+-- ```
+-- Expression found by `grind extract min_ast` is not smaller.
+--   [13] f 0 = 42
+-- vs
+--   [11] f (g a b) = 42
+-- ```
+--
+-- ... as the naive cost of `0` is that of `@OfNat.ofNat Nat (nat_lit 0) (instOfNatNat (nat_lit 0))`
+-- which is greater than that of `g a b`.
 /--
 info: Try this:
   [apply] suffices «min_ast» : f 0 = 42 by grind

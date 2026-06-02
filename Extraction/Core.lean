@@ -6,6 +6,34 @@ open Batteries (BinaryHeap)
 
 namespace Lean.Meta.Grind.Extraction
 
+/--
+Special constants which force applications to have a fixed cost. For example, we want the
+application `@OfNat.ofNat α n inst` to have a fixed cost of `1` instead of accounting for the sizes
+of `α`, `n` and `inst`.
+-/
+def fixedAppSize? (e : Expr) : Option Nat :=
+  match_expr e with
+  | OfNat.ofNat _ _ _ => some 1
+  | _                 => none
+
+/--
+We use this size function instead of `Expr.sizeWithoutSharing` to more closely match the size which
+is computed (incrementally) by `extractMinAST.assign`. This implementation will likely change in the
+future.
+-/
+def exprSize (e : Expr) : Nat :=
+  if let some fixed := fixedAppSize? e then
+    fixed
+  else
+    match e with
+    | .app fn arg               => exprSize fn + exprSize arg
+    | .lam _ dom body _         => exprSize dom + exprSize body
+    | .forallE _ dom body _     => exprSize dom + exprSize body
+    | .letE _ type value body _ => exprSize type + exprSize value + exprSize body
+    | .mdata _ e                => exprSize e
+    | .proj _ _ s               => exprSize s + 1
+    | _                         => 1
+
 structure SizedExpr where
   expr : Expr
   size : Nat
@@ -19,7 +47,7 @@ instance : Coe SizedExpr MessageData where
 
 def _root_.Lean.Expr.toSized (e : Expr) : SizedExpr where
   expr := e
-  size := e.sizeWithoutSharing
+  size := exprSize e
 
 abbrev ExtractM.Queue := BinaryHeap SizedExpr (·.size > ·.size)
 
@@ -171,9 +199,9 @@ def hasMin (eqc : Expr) : ExtractM Bool := do
   let { mins, .. } ← get
   return mins.contains ⟨eqc⟩
 
-def getMin! (eqc : ExprPtr) : ExtractM Expr := do
+def getMin! (eqc : ExprPtr) : ExtractM SizedExpr := do
   let { mins, .. } ← get
-  return mins[eqc]!.expr
+  return mins[eqc]!
 
 def setMin (eqc : Expr) (min : SizedExpr) : ExtractM Unit := do
   modify fun s => { s with mins := s.mins.insert ⟨eqc⟩ min }
@@ -220,18 +248,26 @@ partial def extractMinAST (target : Expr) : GoalM Expr := do
     withTraceExtractNode "Constructing" do construct target
 where
   init : ExtractM Unit := do
+    -- **TODO** Only traverse the e-nodes reachable from `target`.
     for e in ← getExprs do
       withTraceExtractNode e do
         if e.isApp then
-          let childEqcs ← traverseAppChildEqcs e (addParent · e)
-          -- If `numChildEqs = 0`, that means that all parts of the application `e` are non-
-          -- internalized. In that case, we have to consider `e` to be a leaf node.
-          if childEqcs.isEmpty then
-            traceExtract "Enqueuing application leaf"
-            enqueue e.toSized
+          -- Fixed cost applications are considered to be leaves as we do not care about their child
+          -- nodes. We need to take special care not to look at their child e-classes during
+          -- `construct`, as the `mins` may not contain an assignment for these.
+          if let some size := fixedAppSize? e then
+            traceExtract "Enqueuing fixed cost application leaf"
+            enqueue { expr := e, size }
           else
-            traceExtract m!"Pending: {childEqcs.toList.map (·.expr)}"
-            setPending e childEqcs.size
+            let childEqcs ← traverseAppChildEqcs e (addParent · e)
+            -- If `numChildEqs = 0`, that means that all parts of the application `e` are non-
+            -- internalized. In that case, we have to consider `e` to be a leaf node.
+            if childEqcs.isEmpty then
+              traceExtract "Enqueuing application leaf with no internalized children"
+              enqueue e.toSized
+            else
+              traceExtract m!"Pending: {childEqcs.toList.map (·.expr)}"
+              setPending e childEqcs.size
         else if !e.isFalse then
           traceExtract "Enqueuing basic leaf"
           enqueue e.toSized
@@ -239,8 +275,7 @@ where
         tracePending
         traceParents
   assign (target : ExprPtr) : ExtractM Unit := do
-    repeat
-      let some next ← dequeue? | return
+    while let some next ← dequeue? do
       withTraceExtractNode next do
         traceQueue
         traceMins
@@ -259,8 +294,10 @@ where
     -- If the expression is not internalized, we return it as is.
     let some eqc ← getRoot? eqcMem | return eqcMem
     withCache ⟨eqc⟩ do
-      let node ← getMin! ⟨eqc⟩
-      if node.isApp then
+      let { expr := node, .. } ← getMin! ⟨eqc⟩
+      -- Applications with a fixed cost are treated as leaves. We have to respect this here not only
+      -- as an optimization, but as `mins` may not contain assignments for their child e-classes.
+      if node.isApp && (fixedAppSize? node).isNone then
         let e ← node.traverseApp construct
         traceExtract e
         return e
@@ -320,7 +357,8 @@ def extract? (target : Expr) (sketch : Sketch) : GoalM (Option Expr) := do
     extractMinAST target
   | .expr e =>
     let e ← shareCommon e
-    extractExpr? target e
+    let some ex ← extractExpr? target e | return none
+    return ex
   | .or lhs rhs =>
     if let some ex ← extract? target lhs then
       return ex
