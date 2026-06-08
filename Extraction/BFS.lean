@@ -3,9 +3,10 @@ open Std
 
 namespace Lean.Meta.Grind.Extraction
 
-structure CostFn where
-  leaf : Expr → Nat
-  app  : Array Nat → Nat
+/--
+A cost function assigns a cost to an e-node (`Expr`) given the costs of its children `Array Nat`.
+-/
+abbrev CostFn := Expr → (Array Nat) → Nat
 
 namespace ExtractM
 
@@ -106,11 +107,11 @@ def getMinNodeCost (node : Expr) : ExtractM Nat := do
   let { eqcMin, .. } ← get
   node.withApp fun fn args => do
     let children := #[fn] ++ args
-    let argCosts ← children.mapM fun child => do
+    let childCosts ← children.mapM fun child => do
       let eqc ← getRootPtr child
       let (_, cost) := eqcMin[eqc]!
       return cost
-    return costFn.app argCosts
+    return costFn node childCosts
 
 mutual
 
@@ -196,14 +197,14 @@ def visitAppNode (node : Expr) : ExtractM Unit := do
     -- e-classes are already resolved, so the e-node is resolvable.
     if delay = 0 then
       let costFn ← read
-      setNodeMin ⟨node⟩ (costFn.app childCosts)
+      setNodeMin ⟨node⟩ (costFn node childCosts)
 
 def visitNode (node : Expr) : ExtractM Unit := do
   if node.isApp then
     visitAppNode node
   else
     let costFn ← read
-    setNodeMin ⟨node⟩ (costFn.leaf node)
+    setNodeMin ⟨node⟩ (costFn node #[])
 
 nonrec def run (costFn : CostFn) (k : ExtractM α) : GoalM α := do
   Prod.fst <$> k.run ∅ |>.run costFn
