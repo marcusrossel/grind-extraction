@@ -1,7 +1,7 @@
 import Extraction.Lean
 open Std
 
-namespace Lean.Meta.Grind.Extraction
+namespace Lean.Meta.Grind.Extraction.BFS
 
 /--
 A cost function assigns a cost to an e-node (`Expr`) given the costs of its children `Array Nat`.
@@ -47,7 +47,7 @@ def setEqcDelay (eqc : ExprPtr) (delay : Nat) : ExtractM Unit :=
   modify fun s => { s with eqcDelay := s.eqcDelay.insert eqc delay }
 
 def setNodeDelay (node : ExprPtr) (delay : Nat) : ExtractM Unit :=
-  modify fun s => { s with eqcDelay := s.nodeDelay.insert node delay }
+  modify fun s => { s with nodeDelay := s.nodeDelay.insert node delay }
 
 def addEqcParent (eqc parent : ExprPtr) : ExtractM Unit :=
   modify fun s =>
@@ -108,7 +108,9 @@ def getMinNodeCost (node : Expr) : ExtractM Nat := do
   node.withApp fun fn args => do
     let children := #[fn] ++ args
     let childCosts ← children.mapM fun child => do
-      let eqc ← getRootPtr child
+      -- For non-internalized children, we compute the cost directly.
+      -- **TODO** Should we cache the costs of non-internalized expressions?
+      let some eqc ← getRootPtr? child | return costFn child #[]
       let (_, cost) := eqcMin[eqc]!
       return cost
     return costFn node childCosts
@@ -172,32 +174,39 @@ partial def setNodeMin (node : ExprPtr) (cost : Nat) : ExtractM Unit := do
 
 end
 
--- **TODO** With the upcoming `do←` notation, we could use something like we had in `MinAST.lean`
---          (`foldAppChildEqcs`) for the traversal up to unique e-classes here.
 def visitAppNode (node : Expr) : ExtractM Unit := do
   node.withApp fun fn args => do
+    let costFn ← read
     let { eqcMin, .. } ← get
     let mut childCosts := #[]
+    let mut childEqcs : Array ExprPtr := ∅
     let mut delay := 0
-    let mut seenEqcs : HashSet ExprPtr := ∅
     for child in #[fn] ++ args do
-      let eqc ← getRootPtr child
-      -- We need to ensure that we do not traverse the same e-class twice, as otherwise the delays
-      -- (`nodeDelay`) will be broken.
-      unless eqc ∈ seenEqcs do
-        seenEqcs := seenEqcs.insert eqc
-        -- If the child `eqc` is already resolved, remember its cost. If it is not resolved, add
-        -- it to the `delay` and remember that `node` is a parent waiting for it.
-        if let some (_, cost) := eqcMin[eqc]? then
-          childCosts := childCosts.push cost
-        else
-          delay := delay + 1
-          addEqcParent eqc ⟨node⟩
+      -- If `child` is an internalized node.
+      if let some eqc ← getRootPtr? child then
+        -- We need to ensure that we do not traverse the same e-class twice, as otherwise the delays
+        -- (`nodeDelay`) will be broken.
+        unless childEqcs.contains eqc do
+          childEqcs := childEqcs.push eqc
+          -- If the child `eqc` is already resolved, remember its cost. If it is not resolved, add
+          -- it to the `delay` and remember that `node` is a parent waiting for it.
+          if let some (_, cost) := eqcMin[eqc]? then
+            childCosts := childCosts.push cost
+          else
+            delay := delay + 1
+            addEqcParent eqc ⟨node⟩
+      else
+        -- We treat non-internalized children like leaf nodes.
+        -- **TODO** Should we cache the costs of non-internalized expressions?
+        childCosts := childCosts.push (costFn child #[])
     -- If the `delay` is still `0` after traversing all children, that means that all child
-    -- e-classes are already resolved, so the e-node is resolvable.
+    -- e-classes are already resolved, so the e-node is resolvable. Otherwise, we enqueue all
+    -- unresolved e-classes.
     if delay = 0 then
-      let costFn ← read
       setNodeMin ⟨node⟩ (costFn node childCosts)
+    else
+      setNodeDelay ⟨node⟩ delay
+      childEqcs.forM enqueueEqc
 
 def visitNode (node : Expr) : ExtractM Unit := do
   if node.isApp then
@@ -234,9 +243,9 @@ def withCache (eqc : ExprPtr) (k : ConstructM Expr) : ConstructM Expr := do
 
 partial def construct (eqcMem : Expr) : ConstructM Expr := do
   -- If the expression is not internalized, we return it as is.
-  let some eqc ← getRoot? eqcMem | return eqcMem
-  withCache ⟨eqc⟩ do
-    let node ← getMinNode ⟨eqc⟩
+  let some eqc ← getRootPtr? eqcMem | return eqcMem
+  withCache eqc do
+    let node ← getMinNode eqc
     if node.isApp then
       node.traverseApp construct
     else

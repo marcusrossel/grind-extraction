@@ -32,6 +32,10 @@ def getRootPtr (e : Expr) : GoalM ExprPtr := do
   let root ← getRoot e
   return ⟨root⟩
 
+def getRootPtr? (e : Expr) : GoalM (Option ExprPtr) := do
+  let some root ← getRoot? e | return none
+  return some ⟨root⟩
+
 @[inline] def firstInEqc? (rep : Expr) (f : Expr → GoalM (Option α)) : GoalM (Option α) := do
   let mut curr := rep
   repeat

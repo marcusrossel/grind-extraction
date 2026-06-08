@@ -1,8 +1,19 @@
-import Extraction.MinAST
+import Extraction.BFS
+import Extraction.ExprSize
 import Extraction.Lean
 import Extraction.Sketch
 
 namespace Lean.Meta.Grind.Extraction
+
+-- Note: Expects `target` to be internalized and hash-consed.
+partial def extractMinAST (target : Expr) : GoalM Expr := do
+  BFS.extract target fun node childCosts =>
+    if let some fixed := fixedAppSize? node then
+      fixed
+    else if childCosts.isEmpty then
+      exprSize node
+    else
+      childCosts.sum
 
 -- Note: Expects `target` to be internalized and hash-consed and `expr` to be hash-consed.
 partial def extractExpr? (target expr : Expr) : GoalM (Option Expr) := do
