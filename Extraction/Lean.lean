@@ -24,7 +24,13 @@ def mkEqHEqMP (eqHEqProof pr : Expr) : MetaM Expr := do
   let type ← inferType eqHEqProof
   if type.isEq then mkEqMP eqHEqProof pr else mkHEqMP eqHEqProof pr
 
+deriving instance Inhabited for Sym.ExprPtr
+
 namespace Grind
+
+def getRootPtr (e : Expr) : GoalM ExprPtr := do
+  let root ← getRoot e
+  return ⟨root⟩
 
 @[inline] def firstInEqc? (rep : Expr) (f : Expr → GoalM (Option α)) : GoalM (Option α) := do
   let mut curr := rep
