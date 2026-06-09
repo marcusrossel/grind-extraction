@@ -78,7 +78,6 @@ info: Try this:
 example (f g : Nat → Nat) (h : g a = b) : f (g a) = 0 := by
   grind extract min_ast
 
-
 /--
 info: Try this:
   [apply] suffices «min_ast» : f b = 0 by grind
@@ -139,8 +138,6 @@ example (f : Nat → Nat) (h₁ : x = y) (h₂ : x + x = 0) (h₃ : f 0 = 0) : f
 variable (f : Nat → Nat) (x y : Nat)
 variable (h₁ : x = y) (h₂ : x + x = 0) (h₃ : f 0 = 0)
 
-set_option trace.grind.extract.minAST true
-
 -- **TODO** We would have expected the e-class of `a + b` to contain `0` as well, but it doesn't.
 --          Although, when just running `grind` and checking the diagnostics, the terms `0` and
 --          `2 * a` are in the same equivalence class.
@@ -154,9 +151,6 @@ example (f : Nat → Nat) (h : a + a = 0) (h' : a = b) : f (a + b) = 42 := by
 -- e-class as `2 * a`. Why not!?
 example (h : a + a = 0) : a + a = 0 := by
   grind extract min_ast
-
-
-
 
 variable (f : Nat → Nat) (a b : Nat)
 

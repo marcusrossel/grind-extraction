@@ -1,20 +1,14 @@
 import Extraction.Lean
+import Extraction.Cost
 open Std
 
-namespace Lean.Meta.Grind.Extraction.BFS
-
-/--
-A cost function assigns a cost to an e-node (`Expr`) given the costs of its children `Array Nat`.
--/
-abbrev CostFn := Expr → (Array Nat) → Nat
-
-namespace ExtractM
+namespace Lean.Meta.Grind.Extraction.BFS.ExtractM
 
 structure State where
   /-- A FIFO queue used for scheduling e-nodes in a BFS-style traversal of the e-graph. -/
   queue : Queue Expr
-  /-- The set of e-classes who have already been enqueued. -/
-  visitedEqcs : HashSet ExprPtr
+  /-- The set of e-classes who have at least one e-node which has been dequeued. -/
+  activeEqcs : HashSet ExprPtr
   /-- Maps e-classes to the set of e-nodes which reference them. Note that this map is not complete.
       When an e-node is visited, we register the e-node as a parent only for its child e-classes
       which are *unresolved* (do not have an entry in `eqcMin`). -/
@@ -24,24 +18,24 @@ structure State where
   /-- Maps e-nodes to the number of e-classes they are waiting on in order to resolve. -/
   nodeDelay : HashMap ExprPtr Nat
   /-- Maps e-classes to their minimal cost e-node and the associated cost. -/
-  eqcMin : HashMap ExprPtr (ExprPtr × Nat)
+  eqcMin : HashMap ExprPtr (ExprPtr × Cost)
   /-- Maps e-nodes to their minimal cost. -/
-  nodeMin : HashMap ExprPtr Nat
+  nodeMin : HashMap ExprPtr Cost
 
 instance State.instEmptyCollection : EmptyCollection State where
   emptyCollection := {
-    queue := ∅, visitedEqcs := ∅, eqcParents := ∅,
+    queue := ∅, activeEqcs := ∅, eqcParents := ∅,
     eqcDelay := ∅, nodeDelay := ∅, eqcMin := ∅, nodeMin := ∅
   }
 
 abbrev _root_.Lean.Meta.Grind.Extraction.ExtractM := StateT State <| ReaderT CostFn GoalM
 
-def eqcIsVisited (eqc : ExprPtr) : ExtractM Bool := do
-  let { visitedEqcs, .. } ← get
-  return eqc ∈ visitedEqcs
+def eqcIsActive (eqc : ExprPtr) : ExtractM Bool := do
+  let { activeEqcs, .. } ← get
+  return eqc ∈ activeEqcs
 
-def setVisitedEqc (eqc : ExprPtr) : ExtractM Unit := do
-  modify fun s => { s with visitedEqcs := s.visitedEqcs.insert eqc }
+def setActiveEqc (eqc : ExprPtr) : ExtractM Unit := do
+  modify fun s => { s with activeEqcs := s.activeEqcs.insert eqc }
 
 def setEqcDelay (eqc : ExprPtr) (delay : Nat) : ExtractM Unit :=
   modify fun s => { s with eqcDelay := s.eqcDelay.insert eqc delay }
@@ -66,25 +60,22 @@ def enqueueNode (node : Expr) : ExtractM Unit :=
   modify fun s => { s with queue := s.queue.enqueue node }
 
 /--
-Enqueues all e-nodes in the given e-class while also:
-(1) respecting and updating `visitedEqcs` (no e-class is enqueued more than once), and
-(2) setting the `eqcDelay` for the given e-class.
+Enqueues all e-nodes in the given e-class while also setting the `eqcDelay` for the given e-class.
+This should only be called if `eqc` has not been visited yet.
 -/
 def enqueueEqc (eqc : ExprPtr) : ExtractM Unit := do
-  unless ← eqcIsVisited eqc do
-    let nodes ← getEqc eqc.expr
-    nodes.forM enqueueNode
-    -- When an e-class is being visited for the first time (which we assert by the check above),
-    -- then it must be waiting on all of its e-nodes, as these e-nodes could not have been reached
-    -- any other way.
-    setEqcDelay eqc nodes.length
-    setVisitedEqc eqc
+  let nodes ← getEqc eqc.expr
+  nodes.forM enqueueNode
+  -- When an e-class is being visited for the first time (which we assume as a precondition to this
+  -- function), then it must be waiting on all of its e-nodes, as these e-nodes could not have been
+  -- reached any other way.
+  setEqcDelay eqc nodes.length
 
 /--
 Gets the minimum cost e-node in the given e-class. This should only be called when all of the
 `ecq`'s e-nodes are resolved (have a value in `nodeMin`).
 -/
-def getMinNodeInEqc (eqc : ExprPtr) : ExtractM (ExprPtr × Nat) := do
+def getMinNodeInEqc (eqc : ExprPtr) : ExtractM (ExprPtr × Cost) := do
   let { nodeMin, .. } ← get
   -- We split the list of e-nodes into head and tail immediately, so we have a sensible value to
   -- initialize `minNodes` and `minCost` with, below.
@@ -102,7 +93,7 @@ def getMinNodeInEqc (eqc : ExprPtr) : ExtractM (ExprPtr × Nat) := do
 Computes the minimal cost of the given e-node. This should only be called when all of the `node`'s
 child e-classes are resolved (have a value in `eqcMin`).
 -/
-def getMinNodeCost (node : Expr) : ExtractM Nat := do
+def getMinNodeCost (node : Expr) : ExtractM Cost := do
   let costFn ← read
   let { eqcMin, .. } ← get
   node.withApp fun fn args => do
@@ -168,7 +159,7 @@ Sets the minimal cost of the given `node` and runs all required updates afterwar
 `node`'s parent e-class's delay is reduced, which may induce further updates. See `updateNodeParent`
 for details on which updates are propagated.
 -/
-partial def setNodeMin (node : ExprPtr) (cost : Nat) : ExtractM Unit := do
+partial def setNodeMin (node : ExprPtr) (cost : Cost) : ExtractM Unit := do
   modify fun s => { s with nodeMin := s.nodeMin.insert node cost }
   updateNodeParent node.expr
 
@@ -179,36 +170,49 @@ def visitAppNode (node : Expr) : ExtractM Unit := do
     let costFn ← read
     let { eqcMin, .. } ← get
     let mut childCosts := #[]
-    let mut childEqcs : Array ExprPtr := ∅
-    let mut delay := 0
+    let mut delayedEqcs := #[]
+    let mut loops := false
     for child in #[fn] ++ args do
       -- If `child` is an internalized node.
       if let some eqc ← getRootPtr? child then
-        -- We need to ensure that we do not traverse the same e-class twice, as otherwise the delays
-        -- (`nodeDelay`) will be broken.
-        unless childEqcs.contains eqc do
-          childEqcs := childEqcs.push eqc
-          -- If the child `eqc` is already resolved, remember its cost. If it is not resolved, add
-          -- it to the `delay` and remember that `node` is a parent waiting for it.
-          if let some (_, cost) := eqcMin[eqc]? then
-            childCosts := childCosts.push cost
-          else
-            delay := delay + 1
-            addEqcParent eqc ⟨node⟩
+        -- (1) If the child `eqc` is already resolved, remember its cost.
+        -- (2) If it is not resolved, but is active, it is part of a loop. In that case we will
+        --     assign a cost of `.inf` (below) and immedately stop traversing further children as
+        --     this is redundant.
+        -- (3) If `eqc` is not active, add it to the `delayedEqcs` which will be used to set the
+        --     `node`'s `delay` and parent relationships below. Note, it is important that we do
+        --     not set `node` as a parent of `eqc` here *immediately*, as `node` might turn out to
+        --     be looping. In that case, we do not want to have `node` as a parent of `eqc`, as
+        --     then the resolution of `eqc` would try to update `node` in `updateEqcParents`.
+        if let some (_, cost) := eqcMin[eqc]? then
+          childCosts := childCosts.push cost
+        else if ← eqcIsActive eqc then
+          loops := true
+          break
+        else if !delayedEqcs.contains eqc then
+          -- It is important that we do not register the same e-class as delayed multiple times, as
+          -- this would break the `delay` count.
+          delayedEqcs := delayedEqcs.push eqc
       else
         -- We treat non-internalized children like leaf nodes.
         -- **TODO** Should we cache the costs of non-internalized expressions?
         childCosts := childCosts.push (costFn child #[])
-    -- If the `delay` is still `0` after traversing all children, that means that all child
-    -- e-classes are already resolved, so the e-node is resolvable. Otherwise, we enqueue all
-    -- unresolved e-classes.
-    if delay = 0 then
+    if loops then
+      setNodeMin ⟨node⟩ .inf
+    else if delayedEqcs.size = 0 then
       setNodeMin ⟨node⟩ (costFn node childCosts)
     else
-      setNodeDelay ⟨node⟩ delay
-      childEqcs.forM enqueueEqc
+      setNodeDelay ⟨node⟩ delayedEqcs.size
+      for eqc in delayedEqcs do
+        addEqcParent eqc ⟨node⟩
+        enqueueEqc eqc
 
 def visitNode (node : Expr) : ExtractM Unit := do
+  -- It is important that we set the node's e-class as active before we do anything else, as the
+  -- node might contain an immediate loop to its own e-class. In that case, the e-class already
+  -- needs to be marked as active for us to notice the loop.
+  let eqc ← getRootPtr node
+  setActiveEqc eqc
   if node.isApp then
     visitAppNode node
   else

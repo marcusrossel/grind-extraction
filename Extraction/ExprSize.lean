@@ -9,7 +9,7 @@ of `α`, `n` and `inst`.
 -/
 def fixedAppSize? (e : Expr) : Option Nat :=
   match_expr e with
-  | False             => some 1000000000000000
+  | False             => some 1000000000000000 -- **TODO** This is not a viable option. It makes any term `f False` very costly too.
   | OfNat.ofNat _ _ _ => some 1
   | _                 => none
 
