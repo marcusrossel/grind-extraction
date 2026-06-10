@@ -2,13 +2,23 @@ import Extraction.Lean
 import Extraction.Cost
 open Std
 
-namespace Lean.Meta.Grind.Extraction.BFS.ExtractM
+namespace Lean.Meta.Grind.Extraction.BFS
+
+/--
+A cost function assigns a cost to an e-node (`Expr`) given the costs of its children `Array Cost`.
+-/
+abbrev CostFn := Expr → (Array Cost) → Cost
+
+namespace ExtractM
 
 structure State where
   /-- A FIFO queue used for scheduling e-nodes in a BFS-style traversal of the e-graph. -/
   queue : Queue Expr
   /-- The set of e-classes who have at least one e-node which has been dequeued. -/
   activeEqcs : HashSet ExprPtr
+  /-- The set of e-classes who have been enqueued. This is used to avoid duplicate enqueuing of
+      e-classes (and therefore their e-nodes) which would break delay counts. -/
+  enqueuedEqcs : HashSet ExprPtr
   /-- Maps e-classes to the set of e-nodes which reference them. Note that this map is not complete.
       When an e-node is visited, we register the e-node as a parent only for its child e-classes
       which are *unresolved* (do not have an entry in `eqcMin`). -/
@@ -24,7 +34,7 @@ structure State where
 
 instance State.instEmptyCollection : EmptyCollection State where
   emptyCollection := {
-    queue := ∅, activeEqcs := ∅, eqcParents := ∅,
+    queue := ∅, activeEqcs := ∅, enqueuedEqcs := ∅, eqcParents := ∅,
     eqcDelay := ∅, nodeDelay := ∅, eqcMin := ∅, nodeMin := ∅
   }
 
@@ -34,8 +44,15 @@ def eqcIsActive (eqc : ExprPtr) : ExtractM Bool := do
   let { activeEqcs, .. } ← get
   return eqc ∈ activeEqcs
 
+def eqcIsEnqueued (eqc : ExprPtr) : ExtractM Bool := do
+  let { enqueuedEqcs, .. } ← get
+  return eqc ∈ enqueuedEqcs
+
 def setActiveEqc (eqc : ExprPtr) : ExtractM Unit := do
   modify fun s => { s with activeEqcs := s.activeEqcs.insert eqc }
+
+def setEnqueuedEqc (eqc : ExprPtr) : ExtractM Unit := do
+  modify fun s => { s with enqueuedEqcs := s.enqueuedEqcs.insert eqc }
 
 def setEqcDelay (eqc : ExprPtr) (delay : Nat) : ExtractM Unit :=
   modify fun s => { s with eqcDelay := s.eqcDelay.insert eqc delay }
@@ -60,16 +77,19 @@ def enqueueNode (node : Expr) : ExtractM Unit :=
   modify fun s => { s with queue := s.queue.enqueue node }
 
 /--
-Enqueues all e-nodes in the given e-class while also setting the `eqcDelay` for the given e-class.
-This should only be called if `eqc` has not been visited yet.
+Enqueues all e-nodes in the given e-class while also:
+(1) respecting and updating `enqueuedEqcs` (no e-class is enqueued more than once), and
+(2) setting the `eqcDelay` for the given e-class.
 -/
 def enqueueEqc (eqc : ExprPtr) : ExtractM Unit := do
-  let nodes ← getEqc eqc.expr
-  nodes.forM enqueueNode
-  -- When an e-class is being visited for the first time (which we assume as a precondition to this
-  -- function), then it must be waiting on all of its e-nodes, as these e-nodes could not have been
-  -- reached any other way.
-  setEqcDelay eqc nodes.length
+  unless ← eqcIsEnqueued eqc do
+    let nodes ← getEqc eqc.expr
+    nodes.forM enqueueNode
+    -- When an e-class is being enqueued for the first time (which we assert by the check above),
+    -- then it must be waiting on all of its e-nodes, as these e-nodes could not have been reached
+    -- any other way.
+    setEqcDelay eqc nodes.length
+    setEnqueuedEqc eqc
 
 /--
 Gets the minimum cost e-node in the given e-class. This should only be called when all of the
@@ -205,6 +225,7 @@ def visitAppNode (node : Expr) : ExtractM Unit := do
       setNodeDelay ⟨node⟩ delayedEqcs.size
       for eqc in delayedEqcs do
         addEqcParent eqc ⟨node⟩
+        -- Note: `enqueueEqc` ensures that an e-class is not enqueued multiple times.
         enqueueEqc eqc
 
 def visitNode (node : Expr) : ExtractM Unit := do

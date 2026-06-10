@@ -37,10 +37,3 @@ instance : LT Cost where
 
 instance : DecidableLT Cost :=
   fun _ _ => decidable_of_bool _ Iff.rfl
-
-end Cost
-
-/--
-A cost function assigns a cost to an e-node (`Expr`) given the costs of its children `Array Cost`.
--/
-abbrev CostFn := Expr → (Array Cost) → Cost
