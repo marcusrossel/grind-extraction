@@ -3,16 +3,26 @@ import Extraction.Cost
 import Batteries
 open Std
 
-namespace Lean.Meta.Grind.Extraction.AStar.TopDownM
+namespace Lean.Meta.Grind.Extraction.AStar
 
 structure CostNode where
-  expr        : Expr
-  minPathCost : Cost
+  expr : Expr
+  /-- The cost of only `expr` itself. In the context of `TopDownM` this is a lower bound cost
+      estimate. In the context of `BottomUpM` this is the exact cost of the minimal cost term
+      represented by `expr`. -/
+  cost : Cost
+  /-- The path cost up to but not including `expr` itself. -/
+  pathCost : Cost
+
+def CostNode.merit (n : CostNode) : Cost :=
+  n.cost + n.pathCost
 
 instance CostNode.instCoeExpr : Coe CostNode Expr where
   coe := expr
 
-abbrev Queue := Batteries.BinaryHeap CostNode (·.minPathCost > ·.minPathCost)
+abbrev Queue := Batteries.BinaryHeap CostNode (·.merit > ·.merit)
+
+namespace TopDownM
 
 structure Context where
   /-- The cost function which maps e-nodes (`Expr`) to a lower bound on the cost of an extracted
@@ -30,8 +40,12 @@ structure Result where
       `f a` and `g a`, then `parents[a]? = #[f a, g a]`. Note that we expect the given `ExprPtr` to
       be the `root` of the e-class. -/
   eqcParents : HashMap ExprPtr (Array ExprPtr)
-  /-- Given an e-node `ExprPtr`, records the minimal path cost from a root e-class to the e-node. -/
-  minPathCost : HashMap ExprPtr Cost
+  /-- Given a non-leaf e-node `ExprPtr`, records the minimal path cost from a root e-class to the
+      e-node (not including the cost of the e-node itself). -/
+  appPathCost : HashMap ExprPtr Cost
+  /-- The set of leaf e-nodes (with associated costs). We store this as a `Queue` as this will form
+      the initial queue for the bottom-up phase (see `BottomUpM`). -/
+  leaves : Queue
 
 structure State extends Result where
   /-- A priority queue used for scheduling e-nodes in a least-`minPathCost`-first traversal of the
@@ -43,7 +57,7 @@ structure State extends Result where
 
 instance : EmptyCollection State where
   emptyCollection := {
-    nodeDelay := ∅, eqcParents := ∅, minPathCost := ∅, queue := ∅, enqueuedEqcs := ∅
+    nodeDelay := ∅, eqcParents := ∅, appPathCost := ∅, leaves := ∅, queue := ∅, enqueuedEqcs := ∅
   }
 
 abbrev _root_.Lean.Meta.Grind.Extraction.AStar.TopDownM := StateT State <| ReaderT Context GoalM
@@ -71,36 +85,43 @@ def dequeue? : TopDownM (Option CostNode) := do
   modify ({ · with queue })
   return next?
 
-def enqueueNode (node : Expr) (minPathCost : Cost) : TopDownM Unit := do
-  let cnode := { expr := node, minPathCost }
+def enqueueNode (node : Expr) (pathCost : Cost) : TopDownM Unit := do
+  let { costFn } ← read
+  let cnode := { expr := node, cost := costFn node, pathCost }
   modify fun s => { s with queue := s.queue.insert cnode }
 
-def enqueueEqc (eqc : ExprPtr) (minEqcPathCost : Cost) : TopDownM Unit := do
+def enqueueEqc (eqc : ExprPtr) (eqcPathCost : Cost) : TopDownM Unit := do
   unless ← isEnqueuedEqc eqc do
-    let { costFn } ← read
     let nodes ← getEqc eqc.expr
     for node in nodes do
-      let cost := minEqcPathCost + costFn node
-      enqueueNode node cost
+      enqueueNode node eqcPathCost
     addEnqueuedEqc eqc
 
-def setMinPathCost (cnode : CostNode) : TopDownM Unit := do
-  modify fun s => { s with minPathCost := s.minPathCost.insert ⟨cnode⟩ cnode.minPathCost }
+def setAppPathCost (cnode : CostNode) : TopDownM Unit := do
+  modify fun s => { s with appPathCost := s.appPathCost.insert ⟨cnode⟩ cnode.pathCost }
+
+def addLeaf (cnode : CostNode) : TopDownM Unit := do
+  modify fun s => { s with leaves := s.leaves.insert cnode }
+
+def visitAppNode (cnode : CostNode) : TopDownM Unit := do
+  setAppPathCost cnode
+  cnode.expr.withApp fun fn args => do
+    let mut uniqueChildEqcs : HashSet ExprPtr := {}
+    for child in #[fn] ++ args do
+      -- If `child` is an internalized node.
+      if let some eqc ← getRootPtr? child then
+        unless eqc ∈ uniqueChildEqcs do
+          uniqueChildEqcs := uniqueChildEqcs.insert eqc
+          addEqcParent eqc ⟨cnode⟩
+          -- Note: `enqueueEqc` ensures that an e-class is not enqueued multiple times.
+          enqueueEqc eqc cnode.merit
+    setNodeDelay cnode uniqueChildEqcs.size
 
 def visitNode (cnode : CostNode) : TopDownM Unit := do
-  setMinPathCost cnode
   if cnode.expr.isApp then
-    cnode.expr.withApp fun fn args => do
-      let mut uniqueChildEqcs : HashSet ExprPtr := {}
-      for child in #[fn] ++ args do
-        -- If `child` is an internalized node.
-        if let some eqc ← getRootPtr? child then
-          unless eqc ∈ uniqueChildEqcs do
-            uniqueChildEqcs := uniqueChildEqcs.insert eqc
-            addEqcParent eqc ⟨cnode⟩
-            -- Note: `enqueueEqc` ensures that an e-class is not enqueued multiple times.
-            enqueueEqc eqc cnode.minPathCost
-      setNodeDelay cnode uniqueChildEqcs.size
+    visitAppNode cnode
+  else
+    addLeaf cnode
 
 /--
 The goal of the top-down step is to:
@@ -123,15 +144,5 @@ nonrec def run (target : Expr) (costFn : Expr → Cost) : GoalM Result := do
 end TopDownM
 
 namespace BottomUpM
-
-structure CostNode where
-  expr     : Expr
-  cost     : Cost
-  pathCost : Cost
-
-def CostNode.merit (n : CostNode) : Cost :=
-  n.cost + n.pathCost
-
-abbrev Queue := Batteries.BinaryHeap CostNode (·.merit > ·.merit)
 
 -- ...
