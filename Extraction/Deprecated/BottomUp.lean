@@ -3,11 +3,11 @@ import Extraction.ExprSize
 import Batteries
 open Std
 
-namespace Lean.Meta.Grind.Extraction
+namespace Lean.Meta.Grind.Extraction.BottomUp.ExtractM
 
-abbrev ExtractM.Queue := Batteries.BinaryHeap SizedExpr (·.size > ·.size)
+abbrev Queue := Batteries.BinaryHeap SizedExpr (·.size > ·.size)
 
-structure ExtractM.State where
+structure State where
   /-- Records the minimal e-node for each e-class. Note that we expect the given `ExprPtr` to be the
       `root` of the e-class. The size associated with each e-node is the the size which its minimal
       representation *will* have when/if constructed. -/
@@ -29,12 +29,10 @@ structure ExtractM.State where
       of the minimal expression more efficient in `extractMinAST.construct`. -/
   cache : HashMap ExprPtr Expr
 
-instance ExtractM.State.instEmptyCollection : EmptyCollection State where
+instance State.instEmptyCollection : EmptyCollection State where
   emptyCollection := { mins := ∅, parents := ∅, pending := ∅, queue := ∅, cache := ∅ }
 
-abbrev ExtractM := StateT ExtractM.State GoalM
-
-namespace ExtractM
+abbrev _root_.Lean.Meta.Grind.Extraction.BottomUp.ExtractM := StateT ExtractM.State GoalM
 
 def traceExtract (msg : Thunk MessageData) : ExtractM Unit := do
   trace[grind.extract.minAST] msg.get
@@ -211,7 +209,7 @@ end ExtractM
 
 -- Note: Expects `target` to be internalized and hash-consed.
 open ExtractM
-partial def extractMinAST (target : Expr) : GoalM Expr := do
+partial def extract (target : Expr) : GoalM Expr := do
   run do
     withTraceExtractNode "Initializing" do init target
     withTraceExtractNode "Assigning"    do assign ⟨target⟩
