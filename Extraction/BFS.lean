@@ -245,13 +245,13 @@ nonrec def run (costFn : CostFn) (k : ExtractM α) : GoalM α := do
 
 end ExtractM
 
-namespace ConstructM
-
 /--
-Adds a cache on `ExtractM` mapping e-classes to expressions, used hen construction of the final
+Adds a cache on `ExtractM` mapping e-classes to expressions, used in construction of the final
 extracted expression.
 -/
 abbrev ConstructM := StateT (HashMap ExprPtr Expr) ExtractM
+
+namespace ConstructM
 
 def getMinNode (eqc : ExprPtr) : ConstructM Expr := do
   let { eqcMin, .. } ← getThe ExtractM.State
