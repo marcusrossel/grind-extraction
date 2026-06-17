@@ -1,4 +1,4 @@
-import Extraction.BFS
+import Extraction.AStar
 import Extraction.ExprSize
 import Extraction.Lean
 import Extraction.Sketch
@@ -7,13 +7,24 @@ namespace Lean.Meta.Grind.Extraction
 
 -- Note: Expects `target` to be internalized and hash-consed.
 partial def extractMinAST (target : Expr) : GoalM Expr := do
-  BFS.extract target fun node childCosts =>
+  AStar.extract target fun node childCosts? =>
+    -- **TODO** The `fixedAppSize?` breaks superiority which might be a problem.
     if let some fixed := fixedAppSize? node then
       fixed
-    else if childCosts.isEmpty then
-      exprSize node
+    else if let some childCosts := childCosts? then
+      if childCosts.isEmpty then
+        exprSize node -- Exact cost when `node` is a leaf.
+      else
+        childCosts.sum -- Exact cost when `node` is an app.
+    else if node.isApp then
+      node.getAppNumArgs -- Lower bound cost when `node` is an app.
+      -- Note, this is one less than the number of children of `node`. If we chose exactly the
+      -- number of children as the cost, then when a child of `node` inherits this path cost, its
+      -- merit might *exceed* the actual cost. For example, if we gave `f a b c d` a path cost of
+      -- `5`, then its child `a` will have a merit of `6` or more which might exceed the cost of
+      -- `f a b c d`.
     else
-      childCosts.sum
+      exprSize node -- Lower bound cost when `node` is a leaf.
 
 -- Note: Expects `target` to be internalized and hash-consed and `expr` to be hash-consed.
 partial def extractExpr? (target expr : Expr) : GoalM (Option Expr) := do
