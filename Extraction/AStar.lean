@@ -1,9 +1,10 @@
 import Extraction.Lean
-import Extraction.Cost
 import Batteries
 open Std
 
 namespace Lean.Meta.Grind.Extraction.AStar
+
+abbrev Cost := Nat
 
 structure CostNode where
   expr : Expr
@@ -187,8 +188,8 @@ def eqcHasMin (eqc : ExprPtr) : BottomUpM Bool := do
   let { eqcMin, .. } ← get
   return eqc ∈ eqcMin
 
-def setEqcMinIfNew (eqc : ExprPtr) (node : Expr) (cost : Cost) : BottomUpM Unit := do
-  modify fun s => { s with eqcMin := s.eqcMin.insertIfNew eqc (node, cost) }
+def setEqcMin (eqc : ExprPtr) (node : Expr) (cost : Cost) : BottomUpM Unit := do
+  modify fun s => { s with eqcMin := s.eqcMin.insert eqc (node, cost) }
 
 def setNodeDelay (node : ExprPtr) (delay : Nat) : BottomUpM Unit :=
   modify fun s => { s with nodeDelay := s.nodeDelay.insert node delay }
@@ -242,8 +243,9 @@ def updateEqcParents (eqc : ExprPtr) : BottomUpM Unit := do
       setNodeDelay parentNode delay
 
 def assignEqc (eqc : ExprPtr) (cnode : CostNode) : BottomUpM Unit := do
-  setEqcMinIfNew eqc cnode.expr cnode.cost
-  updateEqcParents eqc
+  unless ← eqcHasMin eqc do
+    setEqcMin eqc cnode.expr cnode.cost
+    updateEqcParents eqc
 
 def visitNode (cnode : CostNode) : BottomUpM Unit := do
   let eqc ← getRootPtr cnode
