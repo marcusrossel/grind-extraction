@@ -6,10 +6,18 @@ namespace Lean.Meta.Grind.Extraction.AStar
 
 abbrev Cost := Nat
 
+abbrev CostFn := Expr → Option (Array Cost) → Cost
+
+def CostFn.approx (costFn : CostFn) (e : Expr) : Cost :=
+  costFn e none
+
+def CostFn.exact (costFn : CostFn) (e : Expr) (cs : Array Cost) : Cost :=
+  costFn e cs
+
 structure CostNode where
   expr : Expr
-  /-- The cost of only `expr` itself. In the context of `TopDownM` this is a lower bound cost
-      estimate. In the context of `BottomUpM` this is the exact cost of the minimal cost term
+  /-- The cost of only `expr` itself. In the context of `.visit` actions, this is a lower bound cost
+      estimate. In the context of `.assign` actions, this is the exact cost of the minimal cost term
       represented by `expr`. -/
   cost : Cost
   /-- The path cost up to but not including `expr` itself. -/
@@ -21,25 +29,25 @@ def CostNode.merit (n : CostNode) : Cost :=
 instance CostNode.instCoeExpr : Coe CostNode Expr where
   coe := expr
 
-abbrev NodeQueue := Batteries.BinaryHeap CostNode (·.merit > ·.merit)
-
-inductive ActionQueue.Action where
+inductive Action where
   | visit (node : CostNode)
   | assign (eqc : ExprPtr) (node : CostNode)
 
-def ActionQueue.Action.node : Action → CostNode
+def Action.node : Action → CostNode
   | visit node | assign _ node => node
 
-abbrev ActionQueue := Batteries.BinaryHeap ActionQueue.Action (·.node.merit > ·.node.merit)
+abbrev Queue := Batteries.BinaryHeap Action (·.node.merit > ·.node.merit)
 
-namespace TopDownM
+namespace SearchM
 
 structure Context where
-  /-- The cost function which maps e-nodes (`Expr`) to a lower bound on the cost of an extracted
-      term involving the given e-node. -/
-  costFn : Expr → Cost
+  costFn : CostFn
 
-structure Result where
+structure State where
+  queue : Queue
+  /-- The set of e-classes who have been enqueued. This is used to avoid duplicate enqueuing of
+      e-classes (and therefore their e-nodes). -/
+  enqueuedEqcs : HashSet ExprPtr
   /-- Given an e-node `ExprPtr`, indicates how many unresolved child e-classes it has. For example,
       for `f a b c`, if `mins` contains a value for `f` and `b`, but not `a` and `c`, then
       `delay[f a b c]? = 2`. Note that we only count *distinct* e-classes, so multiple references to
@@ -49,222 +57,161 @@ structure Result where
   /-- Maps e-classes to the set of e-nodes which reference them. For example, if there are e-nodes
       `f a` and `g a`, then `parents[a]? = #[f a, g a]`. Note that we expect the given `ExprPtr` to
       be the `root` of the e-class. -/
-  eqcParents : HashMap ExprPtr (Array ExprPtr)
-  /-- Given a non-leaf e-node `ExprPtr`, records the minimal path cost from a root e-class to the
-      e-node (not including the cost of the e-node itself). -/
-  appPathCost : HashMap ExprPtr Cost
-  /-- The set of leaf e-nodes (with associated costs). We store this as an `ActionQueue` as this
-      will form the initial queue for the bottom-up phase (see `BottomUpM`). -/
-  leaves : ActionQueue
-
-structure State extends Result where
-  /-- A priority queue used for scheduling e-nodes in a least-`merit`-first traversal of the
-      e-graph. -/
-  queue : NodeQueue
-  /-- The set of e-classes who have been enqueued. This is used to avoid duplicate enqueuing of
-      e-classes (and therefore their e-nodes). -/
-  enqueuedEqcs : HashSet ExprPtr
-
-instance : EmptyCollection State where
-  emptyCollection := {
-    nodeDelay := ∅, eqcParents := ∅, appPathCost := ∅, leaves := ∅, queue := ∅, enqueuedEqcs := ∅
-  }
-
-abbrev _root_.Lean.Meta.Grind.Extraction.AStar.TopDownM := StateT State <| ReaderT Context GoalM
-
-def setNodeDelay (node : Expr) (num : Nat) : TopDownM Unit := do
-  modify fun s => { s with nodeDelay := s.nodeDelay.insert ⟨node⟩ num }
-
-def addEnqueuedEqc (eqc : ExprPtr) : TopDownM Unit := do
-  modify fun s => { s with enqueuedEqcs := s.enqueuedEqcs.insert eqc }
-
-def isEnqueuedEqc (eqc : ExprPtr) : TopDownM Bool := do
-  let { enqueuedEqcs, .. } ← get
-  return eqc ∈ enqueuedEqcs
-
-def addEqcParent (eqc node : ExprPtr) : TopDownM Unit := do
-  modify fun s =>
-    let eqcParents := s.eqcParents.alter eqc fun
-      | none    => #[node]
-      | some ps => ps.push node
-    { s with eqcParents }
-
-def dequeue? : TopDownM (Option CostNode) := do
-  let { queue, .. } ← get
-  let (next?, queue) := queue.extractMax
-  modify ({ · with queue })
-  return next?
-
-def enqueueNode (node : Expr) (pathCost : Cost) : TopDownM Unit := do
-  let { costFn } ← read
-  let cnode := { expr := node, cost := costFn node, pathCost }
-  modify fun s => { s with queue := s.queue.insert cnode }
-
-def enqueueEqc (eqc : ExprPtr) (eqcPathCost : Cost) : TopDownM Unit := do
-  unless ← isEnqueuedEqc eqc do
-    let nodes ← getEqc eqc.expr
-    for node in nodes do
-      enqueueNode node eqcPathCost
-    addEnqueuedEqc eqc
-
-def setAppPathCost (cnode : CostNode) : TopDownM Unit := do
-  modify fun s => { s with appPathCost := s.appPathCost.insert ⟨cnode⟩ cnode.pathCost }
-
-def addLeaf (cnode : CostNode) : TopDownM Unit := do
-  modify fun s => { s with leaves := s.leaves.insert (.visit cnode) }
-
-def visitAppNode (cnode : CostNode) : TopDownM Unit := do
-  setAppPathCost cnode
-  cnode.expr.withApp fun fn args => do
-    let mut uniqueChildEqcs : HashSet ExprPtr := {}
-    for child in #[fn] ++ args do
-      -- If `child` is an internalized node.
-      if let some eqc ← getRootPtr? child then
-        unless eqc ∈ uniqueChildEqcs do
-          uniqueChildEqcs := uniqueChildEqcs.insert eqc
-          addEqcParent eqc ⟨cnode⟩
-          -- Note: `enqueueEqc` ensures that an e-class is not enqueued multiple times.
-          enqueueEqc eqc cnode.merit
-    setNodeDelay cnode uniqueChildEqcs.size
-
-def visitNode (cnode : CostNode) : TopDownM Unit := do
-  if cnode.expr.isApp then
-    visitAppNode cnode
-  else
-    addLeaf cnode
-
-/--
-The goal of the top-down step is to:
-(1) compute the minimal path cost for each e-node (`minPathCost`)
-(2) record the parents of each e-class (`eqcParents`)
-(3) record the number of unique child e-class of each e-node (`nodeDelay`)
--/
-def main (target : ExprPtr) : TopDownM Unit := do
-  -- **NOTE** We visit more e-nodes/edges than would be necessary for just establishing the minimal
-  --          path cost of each e-class, as we need to ensure that the `parents` and `delay` fields
-  --          are complete. I believe this will not be necessary in *interleaved* A* extraction.
-  enqueueEqc target 0
-  while let some cnode ← dequeue? do visitNode cnode
-
-nonrec def run (target : ExprPtr) (costFn : Expr → Cost) : GoalM Result := do
-  let (_, s) ← main target |>.run ∅ |>.run { costFn }
-  return s.toResult
-
-end TopDownM
-
-namespace BottomUpM
-
-structure Context where
-  /-- The cost function which maps e-nodes (`Expr`) to the cost of extracting a term from it
-      assuming the children has given costs (`Array Cost`). -/
-  costFn : Expr → Array Cost → Cost
-  /-- The minimal path costs of non-leaf e-nodes (not including the cost of the e-node itself). -/
-  appPathCost : HashMap ExprPtr Cost
-  /-- Maps e-classes to the set of e-nodes which reference them. For example, if there are e-nodes
-      `f a` and `g a`, then `parents[a]? = #[f a, g a]`. Note that we expect the given `ExprPtr` to
-      be the `root` of the e-class. -/
-  eqcParents : HashMap ExprPtr (Array ExprPtr)
-
-structure Result where
+  eqcParents : HashMap ExprPtr (Array CostNode)
   /-- Records the minimal e-node for each e-class. Note that we expect the given `ExprPtr` to be the
       `root` of the e-class. The cost associated with each e-node is the the cost which its minimal
       representation *will* have when/if constructed. -/
   eqcMin : HashMap ExprPtr (Expr × Cost)
 
-structure Init where
-  queue : ActionQueue
-  /-- Given an e-node `ExprPtr`, indicates how many unresolved child e-classes it has. For example,
-      for `f a b c`, if `mins` contains a value for `f` and `b`, but not `a` and `c`, then
-      `delay[f a b c]? = 2`. Note that we only count *distinct* e-classes, so multiple references to
-      values of the same e-class are counted only once. For example, in the example above, if `a`
-      and `c` are in the same e-class, then `delay[f a b c]? = 1`. -/
-  nodeDelay : HashMap ExprPtr Nat
+instance : EmptyCollection State where
+  emptyCollection := {
+    queue := ∅, enqueuedEqcs := ∅, nodeDelay := ∅, eqcParents := ∅, eqcMin := ∅
+  }
 
-structure State extends Result, Init
+abbrev _root_.Lean.Meta.Grind.Extraction.AStar.SearchM := StateT State <| ReaderT Context GoalM
 
-abbrev _root_.Lean.Meta.Grind.Extraction.AStar.BottomUpM := StateT State <| ReaderT Context GoalM
-
-def eqcHasMin (eqc : ExprPtr) : BottomUpM Bool := do
+def eqcHasMin (eqc : ExprPtr) : SearchM Bool := do
   let { eqcMin, .. } ← get
   return eqc ∈ eqcMin
 
-def setEqcMin (eqc : ExprPtr) (node : Expr) (cost : Cost) : BottomUpM Unit := do
+def setEqcMin (eqc : ExprPtr) (node : Expr) (cost : Cost) : SearchM Unit := do
   modify fun s => { s with eqcMin := s.eqcMin.insert eqc (node, cost) }
 
-def setNodeDelay (node : ExprPtr) (delay : Nat) : BottomUpM Unit :=
-  modify fun s => { s with nodeDelay := s.nodeDelay.insert node delay }
+def setNodeDelay (node : Expr) (num : Nat) : SearchM Unit := do
+  modify fun s => { s with nodeDelay := s.nodeDelay.insert ⟨node⟩ num }
 
-def enqueue (action : ActionQueue.Action) : BottomUpM Unit := do
-  modify fun s => { s with queue := s.queue.insert action }
+/-- Marks the given e-class as already having been enqueued before (via `enqueueEqc`). -/
+def addEnqueuedEqc (eqc : ExprPtr) : SearchM Unit := do
+  modify fun s => { s with enqueuedEqcs := s.enqueuedEqcs.insert eqc }
 
-def dequeue? : BottomUpM (Option ActionQueue.Action) := do
+def isEnqueuedEqc (eqc : ExprPtr) : SearchM Bool := do
+  let { enqueuedEqcs, .. } ← get
+  return eqc ∈ enqueuedEqcs
+
+def addEqcParent (eqc : ExprPtr) (cnode : CostNode) : SearchM Unit := do
+  modify fun s =>
+    let eqcParents := s.eqcParents.alter eqc fun
+      | none    => #[cnode]
+      | some ps => ps.push cnode
+    { s with eqcParents }
+
+/-- Dequeues the lowest-cost action (using the action's `node`'s `merit`) from the queue. -/
+def dequeue? : SearchM (Option Action) := do
   let { queue, .. } ← get
   let (next?, queue) := queue.extractMax
   modify ({ · with queue })
   return next?
 
-/--
-Computes the minimal cost of the given e-node. This should only be called when all of the `node`'s
-child e-classes are resolved (have a value in `eqcMin`).
--/
-def getMinNodeCost (node : Expr) : BottomUpM Cost := do
+/-- Adds a given action to the queue. -/
+def enqueue (action : Action) : SearchM Unit := do
+  modify fun s => { s with queue := s.queue.insert action }
+
+/-- Adds a `.visit`-action for the given e-node to the queue. -/
+def enqueueVisitNode (node : Expr) (pathCost : Cost) : SearchM Unit := do
+  let { costFn } ← read
+  let cnode := { expr := node, cost := costFn.approx node, pathCost }
+  enqueue (.visit cnode)
+
+/-- Adds a `.assign`-action for the given e-node (its e-class) to the queue. -/
+def enqueueAssignment (cnode : CostNode) (childCosts : Array Cost) : SearchM Unit := do
+  let { costFn } ← read
+  let eqc ← getRootPtr cnode
+  let cnode := { cnode with cost := costFn.exact cnode childCosts }
+  enqueue (.assign eqc cnode)
+
+/-- Adds `.visit`-actions for all e-nodes in the given e-class to the queue. -/
+def enqueueVisitEqc (eqc : ExprPtr) (eqcPathCost : Cost) : SearchM Unit := do
+  unless ← isEnqueuedEqc eqc do
+    let nodes ← getEqc eqc.expr
+    for node in nodes do
+      enqueueVisitNode node eqcPathCost
+    addEnqueuedEqc eqc
+
+def visitAppNode (cnode : CostNode) : SearchM Unit := do
+  cnode.expr.withApp fun fn args => do
+    let { costFn } ← read
+    let { eqcMin, .. } ← get
+    let mut childCosts := #[]
+    let mut delayedEqcs : HashSet ExprPtr := ∅
+    for child in #[fn] ++ args do
+      -- If `child` is an internalized node.
+      if let some eqc ← getRootPtr? child then
+        -- (1) If the child `eqc` is already resolved, remember its cost.
+        -- (2) If `eqc` is not resolved, set the parent-child relationship, set the node delay
+        --     (after the for-loop) and enqueue `eqc`.
+        if let some (_, cost) := eqcMin[eqc]? then
+          childCosts := childCosts.push cost
+        else if eqc ∉ delayedEqcs then
+          -- It is important that we do not register the same e-class as delayed multiple times, as
+          -- this would break the `delay` count.
+          delayedEqcs := delayedEqcs.insert eqc
+          addEqcParent eqc cnode
+          -- Note: `enqueueEqc` ensures that an e-class is not enqueued multiple times.
+          enqueueVisitEqc eqc cnode.merit
+      else
+        -- We treat non-internalized children like leaf nodes.
+        -- **TODO** Should we cache the costs of non-internalized expressions?
+        childCosts := childCosts.push <| costFn.exact child #[]
+    if delayedEqcs.size = 0 then
+      -- If all `cnode` children are resolved, we can add an `.assign`-action for it immediately.
+      enqueueAssignment cnode childCosts
+    else
+      setNodeDelay cnode delayedEqcs.size
+
+def visitNode (cnode : CostNode) : SearchM Unit := do
+  if cnode.expr.isApp then
+    visitAppNode cnode
+  else
+    -- Visiting a leaf node immediately causes an `.assign`-action to be generated for that node.
+    enqueueAssignment cnode #[]
+
+def nodeChildCosts (node : Expr) : SearchM (Array Cost) := do
   let { costFn, .. } ← read
   let { eqcMin, .. } ← get
   node.withApp fun fn args => do
     let children := #[fn] ++ args
-    let childCosts ← children.mapM fun child => do
+    children.mapM fun child => do
       -- For non-internalized children, we compute the cost directly.
       -- **TODO** Should we cache the costs of non-internalized expressions?
-      let some eqc ← getRootPtr? child | return costFn child #[]
+      let some eqc ← getRootPtr? child | return costFn.exact child #[]
       let (_, cost) := eqcMin[eqc]!
       return cost
-    return costFn node childCosts
 
-/-- This should only be called when all child e-classes of `node` have a value in `eqcMin`. -/
-def enqueueAppNodeVisit (node : ExprPtr) : BottomUpM Unit := do
-  let { appPathCost, .. } ← read
-  let pathCost := appPathCost[node]!
-  let cost ← getMinNodeCost node.expr
-  let cnode := { expr := node.expr, cost, pathCost }
-  enqueue (.visit cnode)
-
-def updateEqcParents (eqc : ExprPtr) : BottomUpM Unit := do
-  let { eqcParents, .. } ← read
-  let { nodeDelay, .. } ← get
+def updateEqcParents (eqc : ExprPtr) : SearchM Unit := do
+  let { eqcParents, nodeDelay, .. } ← get
   let some parents := eqcParents[eqc]? | return
   for parentNode in parents do
-    let some (delay + 1) := nodeDelay[parentNode]? | panic! "Reached bad path in `updateEqcParents`."
+    let some (delay + 1) := nodeDelay[(⟨parentNode⟩ : ExprPtr)]?
+      | panic! "Reached bad path in `updateEqcParents`."
     -- Note: When `delay = 0`, we don't update `nodeDelay` as the e-node is resolved anyway.
     if delay = 0 then
       -- The `parentNode` must be an `.app` (had children), otherwise it could (should) never have
       -- been a parent of `eqc`.
-      enqueueAppNodeVisit parentNode
+      let childCosts ← nodeChildCosts parentNode
+      enqueueAssignment parentNode childCosts
     else
       setNodeDelay parentNode delay
 
-def assignEqc (eqc : ExprPtr) (cnode : CostNode) : BottomUpM Unit := do
+def assignEqc (eqc : ExprPtr) (cnode : CostNode) : SearchM Unit := do
   unless ← eqcHasMin eqc do
     setEqcMin eqc cnode.expr cnode.cost
     updateEqcParents eqc
 
-def visitNode (cnode : CostNode) : BottomUpM Unit := do
-  let eqc ← getRootPtr cnode
-  enqueue (.assign eqc cnode)
-
-def runAction : ActionQueue.Action → BottomUpM Unit
+def runAction : Action → SearchM Unit
   | .visit cnode      => visitNode cnode
   | .assign eqc cnode => assignEqc eqc cnode
 
-def main (target : ExprPtr) : BottomUpM Unit := do
+def main (target : ExprPtr) : SearchM Unit := do
+  enqueueVisitEqc target 0
   while let some action ← dequeue? do
     runAction action
     if ← eqcHasMin target then break
 
-nonrec def run (target : ExprPtr) (ctx : Context) (init : Init) : GoalM Result := do
-  let (_, s) ← main target |>.run { init with eqcMin := ∅ } |>.run ctx
-  return s.toResult
+nonrec def run (target : ExprPtr) (costFn : CostFn) : GoalM (HashMap ExprPtr (Expr × Cost)) := do
+  let (_, s) ← main target |>.run ∅ |>.run { costFn }
+  return s.eqcMin
 
-end BottomUpM
+end SearchM
 
 namespace ConstructM
 
@@ -289,7 +236,7 @@ def withCache (eqc : ExprPtr) (k : ConstructM Expr) : ConstructM Expr := do
     return e
   else
     let e ← k
-    modify ({ · with cache := cache.insert eqc e })
+    modify fun s => { s with cache := s.cache.insert eqc e }
     return e
 
 partial def main (eqcMem : Expr) : ConstructM Expr := do
@@ -307,22 +254,7 @@ nonrec def run (target : ExprPtr) (ctx : Context) : GoalM Expr :=
 
 end ConstructM
 
-/--
-A cost function assigns a cost to an e-node (`Expr`) given the costs of its children `Array Cost`.
-If the child costs are not provided, i.e. they are `none`, then the function should return a lower
-bound on the cost of the enode. For example, if we know that a head symbol `f` always incurs a cost
-of `1`, then an application of `f` should return a lower cost bound of `1`.
--/
-abbrev CostFn := Expr → Option (Array Cost) → Cost
-
-def CostFn.approx (costFn : CostFn) (e : Expr) : Cost :=
-  costFn e none
-
-def CostFn.exact (costFn : CostFn) (e : Expr) (cs : Array Cost) : Cost :=
-  costFn e cs
-
 def extract (target : Expr) (costFn : CostFn) : GoalM Expr := do
   let target ← getRootPtr target
-  let { nodeDelay, eqcParents, appPathCost, leaves } ← TopDownM.run target costFn.approx
-  let { eqcMin } ← BottomUpM.run target { costFn := costFn.exact, appPathCost, eqcParents } { queue := leaves, nodeDelay }
+  let eqcMin ← SearchM.run target costFn
   ConstructM.run target { eqcMin }

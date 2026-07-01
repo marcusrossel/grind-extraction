@@ -80,7 +80,7 @@ example (f g : Nat → Nat) (h : g a = b) : f (g a) = 0 := by
 
 /--
 info: Try this:
-  [apply] suffices «min_ast» : f b = 0 by grind
+  [apply] suffices «min_ast» : f a = 0 by grind
 -/
 #guard_msgs(info, drop error) in
 example (f : Nat → Nat) (h : a = b) : f (a + 0) = 0 := by
